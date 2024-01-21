@@ -1,0 +1,4 @@
+# ignore everything in the following folders
+data/*
+models/*
+metrics/*
