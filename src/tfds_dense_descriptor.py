@@ -14,11 +14,11 @@ from scipy.ndimage import rotate
 from skimage.color import gray2rgb
 import torch
 import tensorflow_datasets as tfds
-import nibabel as nib
 from segment_anything import sam_model_registry
 from tqdm import tqdm
 import pandas as pd
 import h5py
+import argparse
 
 from visualization_utils import (crop_image,
                                  extract_coords,
@@ -61,8 +61,6 @@ def load_dinov2(backbone_size='small'):
     return model
 
 def load_medsam(model_path=None):
-    if model_path is None:
-        model_path = os.path.join('models', 'backbones', 'medsam_vit_b.pth')
     device = torch.cuda.current_device()
     model = sam_model_registry['vit_b'](model_path)
     model = model.to(device)
@@ -212,17 +210,29 @@ def rotate_image(image, mask, angle, axes=(0, 1)):
 
 
 if __name__ == "__main__":
-    model_name = 'medsam'
-    model_path = os.path.join('..', 'models', 'backbones', 'medsam', 'medsam_vit_b.pth')
-    dataset_path = r'D:\datasets\medseg\lung_radiomics'
+    parser = argparse.ArgumentParser(description="Obtener ViT patch embeddings de los dataset lung_radiomics")
+
+    parser.add_argument("-mn", "--model_name", type=str, default="medsam",
+                        help="backbone ViT encoder medsam o dinov2")
+    parser.add_argument("-mp", "--model_path", type=str,
+                        default=os.path.join('models', 'backbones', 'medsam', 'medsam_vit_b.pth'),
+                        help="path del archivo model.pth")
+    parser.add_argument("-d", "--dataset_path", type=str, default=os.path.join('data', 'lung_radiomics'),
+                        help="path de los datasets tfds santa_maria y stanford")
+    parser.add_argument("-f", "--feature_folder", type=str, default=os.path.join('data', 'features'),
+                        help="carpeta de salida donde se guardaran los features")
+
+    args = parser.parse_args()
+    model_name = args.model_name
+    model_path = args.model_path
+    dataset_path = args.dataset_path
+    feature_folder = args.feature_folder
 
     model = load_model(model_name, model_path)
-
     datasets = ['santa_maria_dataset', 'stanford_dataset']
 
     dataframes = []
     for dataset_name in datasets:
-        feature_folder = r'..\data\features'
         features_dir = os.path.join(feature_folder, dataset_name)
         os.makedirs(features_dir, exist_ok=True)
         if dataset_name == 'stanford_dataset':
