@@ -28,6 +28,15 @@ from visualization_utils import (crop_image,
 
 
 def prepare_image(img):
+    """ Resize image and convert to torch cuda tensor
+
+    Args:
+        img (np.array): image of a slice with shape (h, w, ch) in a range (0-1).
+
+    Returns:
+        img_tensor (torch.tensor): image as cuda tensor with shape (batch, h, w, ch).
+
+    """
     if len(img.shape) < 3:
         img = gray2rgb(img)
         img_tensor = resize(img, (1024, 1024))
@@ -38,7 +47,18 @@ def prepare_image(img):
     img_tensor = torch.as_tensor(img_tensor, dtype=torch.float32).cuda()
     return img_tensor
 
+
 def load_model(model_name, model_path=None):
+    """ Load a ViT model as image encoder
+
+    Args:
+        model_name (str): 'medsam' or 'dinov2'.
+        model_path (str, optional): path to the .pth file. Defaults to None.
+
+    Returns:
+        model (torch.nn.Module): loaded torch model.
+
+    """
     if model_name == 'dinov2':
         model = load_dinov2()
     elif model_name == 'medsam':
@@ -48,6 +68,15 @@ def load_model(model_name, model_path=None):
 
 
 def load_dinov2(backbone_size='small'):
+    """ Load dinov2 ViT model from torch.hub
+
+    Args:
+        backbone_size (str, optional): size of ViT backbone. Defaults to 'small'.
+
+    Returns:
+        model (torch.nn.Module): loaded torch model.
+
+    """
     backbone_archs = {"small": "vits14",
                       "base": "vitb14",
                       "large": "vitl14",
@@ -60,7 +89,17 @@ def load_dinov2(backbone_size='small'):
     model.cuda()
     return model
 
-def load_medsam(model_path=None):
+
+def load_medsam(model_path):
+    """ Load medsam ViT model from a .pth file
+
+    Args:
+        model_path (str): path to the .pth file.
+
+    Returns:
+        model (torch.nn.Module): loaded torch model.
+
+    """
     device = torch.cuda.current_device()
     model = sam_model_registry['vit_b'](model_path)
     model = model.to(device)
@@ -69,6 +108,16 @@ def load_medsam(model_path=None):
 
 
 def get_dense_descriptor(model, img):
+    """ Use medsam or DinoV2 to extract patch embeddings
+
+    Args:
+        model (torch.nn.Module): ViT image encoder
+        img (np.array): image of an slice with shape (N, M, CH).
+
+    Returns:
+        features (np.array): slice feature maps with shape (N//patch_size, M//patch_size, feature_dim).
+
+    """
     img_tensor = prepare_image(img)
     if model.model_name == 'medsam':
         features_tensor = model.image_encoder(img_tensor)
@@ -91,10 +140,19 @@ def get_dense_descriptor(model, img):
 
 
 def save_features(filename, all_features, all_masks, patient_id):
+    """ Save features and mask in a .hdf5 dataset file
+
+    Args:
+        filename (str): dataset.hdf5 path.
+        all_features (list(np.array)): list of feature maps of each slice.
+        all_masks (list(np.array)): list of nodule maks of each slice.
+        patient_id (str): id of the patient.
+
+    """
     with h5py.File(filename, 'a') as h5f:
         if patient_id in h5f:
             print(f'features for {patient_id} already exists')
-            del h5f[patient_id] 
+            del h5f[patient_id]
         patient_group = h5f.create_group(patient_id)
         for i, (feature, mask) in enumerate(zip(all_features, all_masks)):
             patient_group.create_dataset(f'features/{i}', data=feature)
@@ -102,7 +160,20 @@ def save_features(filename, all_features, all_masks, patient_id):
 
 
 def tfds2voxels(ds, patient_id, pet=False):
-    eps = np.finfo(np.float32).eps
+    """ Get and stack patient slices into volumetrics arrays
+
+    Args:
+        ds (tf.data.Dataset): tfds dataset of a specific modality.
+        patient_id (str): id of the patient.
+        pet (bool, optional): pet images are divided by the mean of the liver pet. Defaults to False.
+
+    Returns:
+        img (np.array): CT or PET 3D data with shape (H, W, slices).
+        mask (np.array): 3D nodule mask with shape (H, W, slices).
+        label (np.array): nodule EGFR class 0: wildtype, 1: mutant, 2: unknown 3: not collected.
+        spatial_res (np.array(tuple)): (x, y, z) spatial resolution of the exam.
+
+    """
     img = []
     mask = []
     label = []
@@ -121,7 +192,17 @@ def tfds2voxels(ds, patient_id, pet=False):
 
 
 def windowing_ct(width, level):
-    """
+    """Generate CT bounds
+
+    Args:
+        width (int): window width in the HU scale.
+        level (int): center of the windows in the HU scale.
+
+    Returns:
+        lower_bound (int): lower CT value.
+        upper_bound (int): upper CT value.
+
+    reference values:
     chest
     - lungs W:1500 L:-600
     - mediastinum W:350 L:50
@@ -149,6 +230,20 @@ def windowing_ct(width, level):
 
 
 def generate_features(model, img_3d, mask_3d, tqdm_text, display=False):
+    """ Extract feature map of each slice and crop them to focus on nodule region.
+
+    Args:
+        model (torch.nn.Module): ViT image encoder
+        img_3d (np.array): CT or PET 3D data with shape (H, W, slices, Ch).
+        mask_3d (np.array): 3D nodule boolean mask with shape (H, W, slices).
+        tqdm_text (str): description to display in the tqdm loading bar.
+        display (bool, optional): To visualize images and extracted features. Defaults to False.
+
+    Returns:
+        features_list (List(np.array)): featuremap of each slice cropped to the nodule region.
+        mask_list (List(np.array)):  binary mask of each slice cropped to the nodule region.
+
+    """
     bigger_mask = np.sum(mask_3d, axis=-1) > 0
 
     h, w = bigger_mask.shape
@@ -180,6 +275,17 @@ def generate_features(model, img_3d, mask_3d, tqdm_text, display=False):
 
 
 def apply_window_ct(ct, width, level):
+    """ Normalize CT image using a window in the HU scale
+
+    Args:
+        ct (np.array): ct image.
+        width (int): window width in the HU scale.
+        level (int): center of the windows in the HU scale.
+
+    Returns:
+        ct (np.array): Normalized image in a range 0-1.
+
+    """
     ct_min_val, ct_max_val = windowing_ct(width, level)
     ct_range = ct_max_val - ct_min_val
     ct = (ct - ct_min_val) / ct_range
@@ -188,6 +294,18 @@ def apply_window_ct(ct, width, level):
 
 
 def flip_image(image, mask, flip_type):
+    """ Flip a 3D image and mask horizontal or vertically
+
+    Args:
+        image (np.array): CT or PET 3D data with shape (H, W, slices, Ch).
+        mask (np.array): 3D nodule boolean mask with shape (H, W, slices).
+        flip_type (str): None, 'horizontal' or 'vertical'.
+
+    Returns:
+        image_flip (np.array): flipped 3D image.
+        mask_flip (np.array): flipped 3D mask.
+
+    """
     image_flip = image.copy()
     mask_flip = mask.copy()
     if flip_type == 'horizontal':
@@ -198,6 +316,19 @@ def flip_image(image, mask, flip_type):
 
 
 def rotate_image(image, mask, angle, axes=(0, 1)):
+    """ Rotates a 3D image and mask in the plane XY
+
+    Args:
+        image (np.array): CT or PET 3D data with shape (H, W, slices, Ch).
+        mask (np.array): 3D nodule boolean mask with shape (H, W, slices).
+        angle (int): rotation angle in degrees.
+        axes (tuple, optional): rotation axis. Defaults to (0, 1).
+
+    Returns:
+        image_rot (TYPE): rotated 3D image.
+        mask_rot (TYPE): rotated 3D mask.
+
+    """
     image_rot = image.copy()
     mask_rot = mask.copy()
     if angle == 0:
