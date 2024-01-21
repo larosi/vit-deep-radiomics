@@ -23,6 +23,46 @@ import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader, WeightedRandomSampler
 
 
+class TransformerNoduleClassifier(nn.Module):
+    def __init__(self, input_dim, dim_feedforward, num_heads, num_classes, num_layers,):
+        super(TransformerNoduleClassifier, self).__init__()
+        encoder_layer = nn.TransformerEncoderLayer(d_model=input_dim,
+                                                   dim_feedforward=dim_feedforward,
+                                                   nhead=num_heads,
+                                                   activation="gelu",
+                                                   batch_first=False)
+        self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+        self.cls_token = nn.Parameter(torch.randn(1, 1, input_dim))
+        self.classifier = nn.Linear(input_dim, num_classes)
+
+    def forward(self, x, attention_mask=None):
+        batch, seq_len, feature_dim = x.shape
+        cls_token = self.cls_token.repeat(batch, 1, 1)
+        x = torch.cat([cls_token, x], dim=1)
+
+        x = self.transformer_encoder(x)
+        return self.classifier(x[:,0,:]), x
+
+    def save_checkpoint(self, save_dir, epoch):
+        if not os.path.exists(save_dir):
+            os.makedirs(save_dir)
+        epoch_str = str(epoch).zfill(4)
+        model_path = os.path.join(save_dir, f'model_epoch_{epoch_str}.pth')
+        self.save(model_path)
+
+    def load_checkpoint(self, save_dir, epoch):
+        epoch_str = str(epoch).zfill(4)
+        model_path = os.path.join(save_dir, f'model_epoch_{epoch_str}.pth')
+        self.load(model_path)
+
+    def save(self, model_path):
+        torch.save(self.state_dict(), model_path)
+
+    def load(self, model_path):
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.load_state_dict(torch.load(model_path, map_location=device))
+
+
 class NoduleClassifier(nn.Module):
     def __init__(self, input_dim, num_classes, div=2):
         super(NoduleClassifier, self).__init__()
@@ -66,8 +106,24 @@ class NoduleClassifier(nn.Module):
         self.load_state_dict(torch.load(model_path, map_location=device))
 
 
+def positional_encoding_3d(x, y, z, D, scale=10):
+    x, y, z = np.asarray(x), np.asarray(y), np.asarray(z)
+    n_points = x.shape[0]
+    encoding = np.zeros((n_points, D))
+
+    for i in range(D // 6):
+        encoding[:, 2*i] = np.sin(x / (scale ** (6 * i / D)))
+        encoding[:, 2*i + 1] = np.cos(x / (scale ** (6 * i / D)))
+        encoding[:, 2*i + D // 3] = np.sin(y / (scale ** (6 * i / D)))
+        encoding[:, 2*i + 1 + D // 3] = np.cos(y / (scale ** (6 * i / D)))
+        encoding[:, 2*i + 2 * D // 3] = np.sin(z / (scale ** (6 * i / D)))
+        encoding[:, 2*i + 1 + 2 * D // 3] = np.cos(z / (scale ** (6 * i / D)))
+
+    return encoding
+
+
 class PETCTDataset3D(Dataset):
-    def __init__(self, dataframe, label_encoder, hdf5_path, use_augmentation=False, feature_dim=256):
+    def __init__(self, dataframe, label_encoder, hdf5_path, use_augmentation=False, feature_dim=256, arch='conv'):
         self.dataframe = dataframe.groupby(['patient_id'])[['modality', 'dataset', 'label']].first()
         self.dataframe.reset_index(inplace=True, drop=False)
 
@@ -81,6 +137,7 @@ class PETCTDataset3D(Dataset):
         self.hdf5_path = hdf5_path
         self.label_encoder = label_encoder
         self.feature_dim = feature_dim
+        self.arch = arch
 
     def __len__(self):
         return len(self.dataframe)
@@ -108,9 +165,31 @@ class PETCTDataset3D(Dataset):
                 features.append(slice_features*slice_mask)  # elementwise prod feature-mask
 
         features = np.transpose(np.stack(features, axis=0), axes=(3, 0, 1, 2))  # shape = (feat_dim, slice, h, w)
+        if self.arch == 'transformer':
+            h_orig, w_orig = slice_mask_orig.shape[0:2]
+            features = np.transpose(np.stack(features, axis=0), axes=(2, 3, 1, 0))
+            h_new, w_new = features.shape[2], features.shape[3]
+            spatial_res = self.dataframe_aug.loc[(patient_id, angle, flip)]['spatial_res'].values[0]
+            x, y, z = np.meshgrid(np.arange(0, features.shape[0]),
+                                  np.arange(0, features.shape[1]),
+                                  np.arange(0, features.shape[2]))
+            x = (x.flatten()/w_new) *w_orig * spatial_res[0]
+            y = (y.flatten()/h_new).flatten() * h_orig * spatial_res[1]
+            z = (z.flatten()).flatten() * spatial_res[2]
+  
+            x = x - x.mean()
+            y = y - y.mean()
+            z = z - z.mean()
+
+            pe = positional_encoding_3d(x, y, z, D=self.feature_dim, scale=100)
+            features = features.reshape(-1, self.feature_dim) + pe/10.0
+            
         labels = np.array(label)
         labels = np.expand_dims(labels, axis=-1)
         labels = self.label_encoder.transform(labels.reshape(-1, 1)).toarray()
+        
+        features = torch.as_tensor(features, dtype=torch.float32)
+        labels = torch.as_tensor(labels, dtype=torch.float32)
 
         return features, labels
 
@@ -280,6 +359,7 @@ def get_sampler_weights(train_labels):
 # TODO: use argparse
 backbone = 'medsam'
 modality = 'ct'
+arch = 'transformer' #'conv'
 desired_datasets = ['stanford', 'santa_maria']
 hdf5_path = os.path.join('..', 'data', 'features', f'features_masks_{modality}.hdf5')
 df_path = os.path.join('..', 'data', 'features', 'petct.parquet')
@@ -369,7 +449,15 @@ for kfold, (train_indices, test_indices) in tqdm(enumerate(skf.split(patients, p
 
     # Create model instance
     device = f'cuda:{torch.cuda.current_device()}'
-    model = NoduleClassifier(input_dim=feature_dim, num_classes=len(EGFR_lm), div=div)
+    if arch == 'transformer':
+        model = TransformerNoduleClassifier(input_dim=feature_dim,
+                                            dim_feedforward=dim_feedforward,
+                                            num_heads=num_heads,
+                                            num_classes=len(EGFR_lm),
+                                            num_layers=num_layers)
+    else:
+        model = NoduleClassifier(input_dim=feature_dim, num_classes=len(EGFR_lm), div=div)
+    
     print(model)
     model = model.to(device)
 
@@ -385,12 +473,14 @@ for kfold, (train_indices, test_indices) in tqdm(enumerate(skf.split(patients, p
                                    label_encoder=EGFR_encoder,
                                    hdf5_path=hdf5_path,
                                    use_augmentation=True,
-                                   feature_dim=feature_dim)
+                                   feature_dim=feature_dim,
+                                   arch=arch)
 
     test_dataset = PETCTDataset3D(df_test,
                                   label_encoder=EGFR_encoder,
                                   hdf5_path=hdf5_path,
-                                  feature_dim=feature_dim)
+                                  feature_dim=feature_dim,
+                                  arch=arch)
 
     # create a sampler to balance training classes proportion
     num_samples = len(train_dataset)
