@@ -23,6 +23,6 @@ if __name__ == "__main__":
                 df_aux = pd.read_parquet(df_path)
                 df.append(df_aux)
     df = pd.concat(df)
-    df.reset_index(drop=True)
-
+    df['flip'] = df['flip'].astype(str)
+    df.reset_index(drop=True, inplace=True)
     df.to_parquet(output_path)
