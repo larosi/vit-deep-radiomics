@@ -283,11 +283,12 @@ hdf5_path = os.path.join('..', 'data', 'features', f'features_masks_{modality}.h
 df_path = os.path.join('..', 'data', 'features', 'petct.parquet')
 models_save_dir = os.path.join('..', 'models', 'petct')  # TODO:  generate an unique experiment ID
 
+# load dataframe and apply some filter criteria
 df = pd.read_parquet(df_path)
 df['dataset'].isin(desired_datasets)
+df = df[df['modality'] == modality]
 df = df[df['flip'] != 'vertical']  # FIXME: some mask arent flipped
 df.reset_index(drop=True, inplace=True)
-
 
 # create labelmap and onehot enconder for nodule EGFR mutation
 EGFR_names = list(df['label'].unique())
