@@ -68,14 +68,17 @@ class NoduleClassifier(nn.Module):
 
 class PETCTDataset3D(Dataset):
     def __init__(self, dataframe, label_encoder, hdf5_path, use_augmentation=False, feature_dim=256):
-        self.dataframe = dataframe.groupby('patient_id')['modality', 'dataset', 'label'].first()
+        self.dataframe = dataframe.groupby(['patient_id'])[['modality', 'dataset', 'label']].first()
         self.dataframe.reset_index(inplace=True, drop=False)
+
         self.use_augmentation = use_augmentation
+        self.flips = list(dataframe['flip'].unique())
+        self.angles = list(dataframe['angle'].unique())
 
         self.dataframe_aug = dataframe.set_index(['patient_id', 'angle', 'flip'])
         self.dataframe_aug = self.dataframe_aug.sort_index()
 
-        self.hdf5_file = h5py.File(self.hdf5_path, 'r')
+        self.hdf5_path = hdf5_path
         self.label_encoder = label_encoder
         self.feature_dim = feature_dim
 
@@ -88,14 +91,13 @@ class PETCTDataset3D(Dataset):
         label = sample.label
 
         if self.use_augmentation:
-            flip = np.random.choice(['None', 'horizontal'])
-            angle = np.random.choice([0,  45,  90, 135])
+            flip = np.random.choice(self.flips)
+            angle = np.random.choice(self.angles)
         else:
             flip = 'None'
             angle = 0
 
         feature_ids = self.dataframe_aug.loc[(patient_id, angle, flip)]['feature_id'].values
-
         features = []
         with h5py.File(self.hdf5_path, 'r') as h5f:
             for feature_id in feature_ids:
@@ -287,7 +289,7 @@ models_save_dir = os.path.join('..', 'models', 'petct')  # TODO:  generate an un
 df = pd.read_parquet(df_path)
 df['dataset'].isin(desired_datasets)
 df = df[df['modality'] == modality]
-df = df[df['flip'] != 'vertical']  # FIXME: some mask arent flipped
+df['flip'] = df['flip'].astype(str)
 df.reset_index(drop=True, inplace=True)
 
 # create labelmap and onehot enconder for nodule EGFR mutation
@@ -328,7 +330,6 @@ for kfold, (train_indices, test_indices) in tqdm(enumerate(skf.split(patients, p
     # filter dataframes based on the split patients
     df_train = df[df['patient_id'].isin(training_patients)]
     df_test = df[df['patient_id'].isin(testing_patients)]
-    df_test = df_test[df_test['augmentation'] is False]  # augmentation is disabled on test
 
     df_train.reset_index(drop=True, inplace=True)
     df_test.reset_index(drop=True, inplace=True)
@@ -380,8 +381,16 @@ for kfold, (train_indices, test_indices) in tqdm(enumerate(skf.split(patients, p
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs, eta_min=0.001)
 
     # create datasets
-    train_dataset = PETCTDataset3D(df_train, label_encoder=EGFR_encoder, use_augmentation=True, feature_dim=feature_dim)
-    test_dataset = PETCTDataset3D(df_test, label_encoder=EGFR_encoder, feature_dim=feature_dim)
+    train_dataset = PETCTDataset3D(df_train,
+                                   label_encoder=EGFR_encoder,
+                                   hdf5_path=hdf5_path,
+                                   use_augmentation=True,
+                                   feature_dim=feature_dim)
+
+    test_dataset = PETCTDataset3D(df_test,
+                                  label_encoder=EGFR_encoder,
+                                  hdf5_path=hdf5_path,
+                                  feature_dim=feature_dim)
 
     # create a sampler to balance training classes proportion
     num_samples = len(train_dataset)
