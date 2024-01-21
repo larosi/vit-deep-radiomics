@@ -30,7 +30,7 @@ class TransformerNoduleClassifier(nn.Module):
                                                    dim_feedforward=dim_feedforward,
                                                    nhead=num_heads,
                                                    activation="gelu",
-                                                   batch_first=False)
+                                                   batch_first=True)
         self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
         self.cls_token = nn.Parameter(torch.randn(1, 1, input_dim))
         self.classifier = nn.Linear(input_dim, num_classes)
