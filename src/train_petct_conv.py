@@ -16,7 +16,7 @@ from skimage.transform import resize
 from sklearn.model_selection import StratifiedKFold
 from sklearn.preprocessing import OneHotEncoder
 from sklearn.metrics import classification_report, roc_auc_score
-
+import argparse
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -360,247 +360,257 @@ def get_sampler_weights(train_labels):
     return weights
 
 
-# TODO: use argparse
-backbone = 'medsam'
-modality = 'ct'
-arch = 'transformer' #'conv'
-desired_datasets = ['stanford', 'santa_maria']
-hdf5_path = os.path.join('..', 'data', 'features', f'features_masks_{modality}.hdf5')
-df_path = os.path.join('..', 'data', 'features', 'petct.parquet')
-models_save_dir = os.path.join('..', 'models', 'petct')  # TODO:  generate an unique experiment ID
 
-# load dataframe and apply some filter criteria
-df = pd.read_parquet(df_path)
-df['dataset'].isin(desired_datasets)
-df = df[df['modality'] == modality]
-df['flip'] = df['flip'].astype(str)
-df.reset_index(drop=True, inplace=True)
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Train 3D transoformer or CNN for lung nodules clasification")
+    parser.add_argument("-a", "--arch", type=str, default="transformer",
+                        help="'transformer' or 'conv'")
+    parser.add_argument("-b", "--backbone", type=str, default="medsam",
+                        help="backbone ViT encoder 'medsam' or 'dinov2'")
+    parser.add_argument("-m", "--modality", type=str, default="ct",
+                        help="ct or pet")
 
-# create labelmap and onehot enconder for nodule EGFR mutation
-EGFR_names = list(df['label'].unique())
-EGFR_names.sort()
-EGFR_lm, EGFR_lm_inv = create_labelmap(EGFR_names)
+    args = parser.parse_args()
 
-EGFR_encoder = OneHotEncoder(handle_unknown='ignore')
-EGFR_encoder.fit(np.array(list(EGFR_lm.keys())).reshape(-1, 1))
+    arch = args.arch
+    backbone = args.backbone
+    modality = args.modality
 
-print('labelmap:')
-print(EGFR_lm)
-print(EGFR_encoder.transform(np.array(list(EGFR_lm.keys())).reshape(-1, 1)).toarray())
+    desired_datasets = ['stanford', 'santa_maria']
+    hdf5_path = os.path.join('..', 'data', 'features', f'features_masks_{modality}.hdf5')
+    df_path = os.path.join('..', 'data', 'features', 'petct.parquet')
+    #models_save_dir = os.path.join('..', 'models', 'petct')  # TODO:  generate an unique experiment ID
+    models_save_dir = os.path.join('..', 'models', 'petct', f'{backbone}_{arch}')
 
+    # load dataframe and apply some filter criteria
+    df = pd.read_parquet(df_path)
+    df['dataset'].isin(desired_datasets)
+    df = df[df['modality'] == modality]
+    df['flip'] = df['flip'].astype(str)
+    df.reset_index(drop=True, inplace=True)
 
-train_metrics = {'kfold': [],
-                 'epoch': [],
-                 'train_loss': [],
-                 'test_loss': []}
+    # create labelmap and onehot enconder for nodule EGFR mutation
+    EGFR_names = list(df['label'].unique())
+    EGFR_names.sort()
+    EGFR_lm, EGFR_lm_inv = create_labelmap(EGFR_names)
 
+    EGFR_encoder = OneHotEncoder(handle_unknown='ignore')
+    EGFR_encoder.fit(np.array(list(EGFR_lm.keys())).reshape(-1, 1))
 
-# use KFold to split patients stratified by label
-skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+    print('labelmap:')
+    print(EGFR_lm)
+    print(EGFR_encoder.transform(np.array(list(EGFR_lm.keys())).reshape(-1, 1)).toarray())
 
-patients_labels = df.groupby('patient_id')['label'].first()
-patients = patients_labels.index.to_list()
-patients_labels = patients_labels.to_list()
+    train_metrics = {'kfold': [],
+                     'epoch': [],
+                     'train_loss': [],
+                     'test_loss': []}
 
+    # use KFold to split patients stratified by label
+    skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
 
-for kfold, (train_indices, test_indices) in tqdm(enumerate(skf.split(patients, patients_labels)), desc='kfold', leave=False, position=0):   
-    save_dir = os.path.join(models_save_dir, modality, f'kfold_{kfold}')
-    os.makedirs(save_dir, exist_ok=True)
+    patients_labels = df.groupby('patient_id')['label'].first()
+    patients = patients_labels.index.to_list()
+    patients_labels = patients_labels.to_list()
 
-    # get patient_ids of each split
-    training_patients = [patients[i] for i in train_indices]
-    testing_patients = [patients[i] for i in test_indices]
-
-    # filter dataframes based on the split patients
-    df_train = df[df['patient_id'].isin(training_patients)]
-    df_test = df[df['patient_id'].isin(testing_patients)]
-
-    df_train.reset_index(drop=True, inplace=True)
-    df_test.reset_index(drop=True, inplace=True)
-
-    #  TODO: define training parameters in a .yaml file
-    if modality == 'ct':
-        batch_size = 1  # TODO: add support for bigger batches using zero padding to create batches of the same size
-        start_epoch = 0
-        num_epochs = 15
-        learning_rate = 0.0001
-        num_layers = 1
-
-        if backbone == 'medsam':
-            feature_dim = 256
-            div = 2  # reduction factor of the conv layers
-
-            # FIXME: deprecated transformer params
-            num_heads = 8
-            dim_feedforward = feature_dim*2
-
-        else:  # dinov2
-            feature_dim = 384
-            div = 3  # reduction factor of the conv layers
-            # FIXME: deprecated transformer params
-            num_heads = 12
-            dim_feedforward = feature_dim*2
-
-    else:  # TODO: PET create CNN arch for PET
-        batch_size = 32
-        start_epoch = 0
-        num_epochs = 35
-        feature_dim = 256
-        learning_rate = 0.0001
-        num_layers = 3
-        num_heads = 4
-        dim_feedforward = feature_dim*4
-
-    # Create model instance
-    device = f'cuda:{torch.cuda.current_device()}'
-    if arch == 'transformer':
-        model = TransformerNoduleClassifier(input_dim=feature_dim,
-                                            dim_feedforward=dim_feedforward,
-                                            num_heads=num_heads,
-                                            num_classes=len(EGFR_lm),
-                                            num_layers=num_layers)
-    else:
-        model = NoduleClassifier(input_dim=feature_dim, num_classes=len(EGFR_lm), div=div)
+    for kfold, (train_indices, test_indices) in tqdm(enumerate(skf.split(patients, patients_labels)), desc='kfold', leave=False, position=0):   
+        save_dir = os.path.join(models_save_dir, modality, f'kfold_{kfold}')
+        os.makedirs(save_dir, exist_ok=True)
     
-    print(model)
-    model = model.to(device)
+        # get patient_ids of each split
+        training_patients = [patients[i] for i in train_indices]
+        testing_patients = [patients[i] for i in test_indices]
+    
+        # filter dataframes based on the split patients
+        df_train = df[df['patient_id'].isin(training_patients)]
+        df_test = df[df['patient_id'].isin(testing_patients)]
+    
+        df_train.reset_index(drop=True, inplace=True)
+        df_test.reset_index(drop=True, inplace=True)
+    
+        #  TODO: define training parameters in a .yaml file
+        if modality == 'ct':
+            batch_size = 1  # TODO: add support for bigger batches using zero padding to create batches of the same size
+            start_epoch = 0
+            num_epochs = 25
+            learning_rate = 0.0001
+            num_layers = 1
+    
+            if backbone == 'medsam':
+                feature_dim = 256
+                div = 2  # reduction factor of the conv layers
+    
+                # FIXME: deprecated transformer params
+                num_heads = 8
+                dim_feedforward = feature_dim*4
+    
+            else:  # dinov2
+                feature_dim = 384
+                div = 3  # reduction factor of the conv layers
+                # FIXME: deprecated transformer params
+                num_heads = 12
+                dim_feedforward = feature_dim*2
+    
+        else:  # TODO: PET create CNN arch for PET
+            batch_size = 32
+            start_epoch = 0
+            num_epochs = 35
+            feature_dim = 256
+            learning_rate = 0.0001
+            num_layers = 3
+            num_heads = 4
+            dim_feedforward = feature_dim*4
 
-    # CrossEntropyLoss because the last layer has one output per class (mutant, wildtype)
-    criterion = nn.CrossEntropyLoss()
+        # Create model instance
+        device = f'cuda:{torch.cuda.current_device()}'
+        if arch == 'transformer':
+            model = TransformerNoduleClassifier(input_dim=feature_dim,
+                                                dim_feedforward=dim_feedforward,
+                                                num_heads=num_heads,
+                                                num_classes=len(EGFR_lm),
+                                                num_layers=num_layers)
+        else:
+            model = NoduleClassifier(input_dim=feature_dim, num_classes=len(EGFR_lm), div=div)
 
-    #optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=0.01, amsgrad=False)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs, eta_min=0.001)
+        print(model)
+        model = model.to(device)
 
-    # create datasets
-    train_dataset = PETCTDataset3D(df_train,
-                                   label_encoder=EGFR_encoder,
-                                   hdf5_path=hdf5_path,
-                                   use_augmentation=True,
-                                   feature_dim=feature_dim,
-                                   arch=arch)
+        # CrossEntropyLoss because the last layer has one output per class (mutant, wildtype)
+        criterion = nn.CrossEntropyLoss()
 
-    test_dataset = PETCTDataset3D(df_test,
-                                  label_encoder=EGFR_encoder,
-                                  hdf5_path=hdf5_path,
-                                  feature_dim=feature_dim,
-                                  arch=arch)
+        #optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+        optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=0.01, amsgrad=False)
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs, eta_min=0.001)
 
-    # create a sampler to balance training classes proportion
-    num_samples = len(train_dataset)
-    train_labels = np.array(list(train_dataset.dataframe.label.values))
-    sampler_weights = get_sampler_weights(train_labels)
-    sampler = WeightedRandomSampler(sampler_weights, num_samples, replacement=True)
+        # create datasets
+        train_dataset = PETCTDataset3D(df_train,
+                                       label_encoder=EGFR_encoder,
+                                       hdf5_path=hdf5_path,
+                                       use_augmentation=True,
+                                       feature_dim=feature_dim,
+                                       arch=arch)
 
-    # create data loaders
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=False, sampler=sampler)
-    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
+        test_dataset = PETCTDataset3D(df_test,
+                                      label_encoder=EGFR_encoder,
+                                      hdf5_path=hdf5_path,
+                                      feature_dim=feature_dim,
+                                      arch=arch)
 
-    with tqdm(total=num_epochs, desc='epoch', position=1, leave=False) as batch_pbar:
-        for epoch in range(start_epoch, start_epoch+num_epochs):
-            # reset loss, labels and predictions to compute epoch metrics
-            total_train_loss = 0
-            total_test_loss = 0
+        # create a sampler to balance training classes proportion
+        num_samples = len(train_dataset)
+        train_labels = np.array(list(train_dataset.dataframe.label.values))
+        sampler_weights = get_sampler_weights(train_labels)
+        sampler = WeightedRandomSampler(sampler_weights, num_samples, replacement=True)
 
-            y_true_train = []
-            y_score_train = []
+        # create data loaders
+        train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=False, sampler=sampler)
+        test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
 
-            y_true_test = []
-            y_score_test = []
+        with tqdm(total=num_epochs, desc='epoch', position=1, leave=False) as batch_pbar:
+            for epoch in range(start_epoch, start_epoch+num_epochs):
+                # reset loss, labels and predictions to compute epoch metrics
+                total_train_loss = 0
+                total_test_loss = 0
 
-            # train loop
-            model.train()
-            for features_batch, labels_batch in tqdm(train_loader, position=2, desc='train batch'):
-                features_batch = features_batch.to(device)
+                y_true_train = []
+                y_score_train = []
 
-                labels_batch = torch.squeeze(labels_batch).to(device)
+                y_true_test = []
+                y_score_test = []
 
-                optimizer.zero_grad()
-                outputs = model(features_batch)
-
-                loss = criterion(torch.squeeze(outputs[0]), labels_batch)
-
-                y_true, y_score = get_y_true_and_pred(y_true=labels_batch, y_pred=outputs[0], cpu=True)
-
-                y_true_train.append(y_true)
-                y_score_train.append(y_score)
-
-                total_train_loss += loss.item()
-
-                loss.backward()
-                optimizer.step()
-
-            # test loop
-            model.eval()
-            with torch.no_grad():
-                for features_batch, labels_batch in tqdm(test_loader, position=2, desc='test batch'):
+                # train loop
+                model.train()
+                for features_batch, labels_batch in tqdm(train_loader, position=2, desc='train batch'):
                     features_batch = features_batch.to(device)
+
                     labels_batch = torch.squeeze(labels_batch).to(device)
 
+                    optimizer.zero_grad()
                     outputs = model(features_batch)
+
                     loss = criterion(torch.squeeze(outputs[0]), labels_batch)
 
                     y_true, y_score = get_y_true_and_pred(y_true=labels_batch, y_pred=outputs[0], cpu=True)
 
-                    y_true_test.append(y_true)
-                    y_score_test.append(y_score)
+                    y_true_train.append(y_true)
+                    y_score_train.append(y_score)
 
-                    total_test_loss += loss.item()
+                    total_train_loss += loss.item()
 
-            scheduler.step()
-            avg_train_loss = total_train_loss / len(train_loader)
-            avg_test_loss = total_test_loss / len(test_loader)
+                    loss.backward()
+                    optimizer.step()
 
-            batch_pbar.set_postfix({'Train Loss': avg_train_loss, 'Test Loss': avg_test_loss})
-            batch_pbar.update()
+                # test loop
+                model.eval()
+                with torch.no_grad():
+                    for features_batch, labels_batch in tqdm(test_loader, position=2, desc='test batch'):
+                        features_batch = features_batch.to(device)
+                        labels_batch = torch.squeeze(labels_batch).to(device)
 
-            # generate y_true and y_pred for each split in the epoch
-            y_true_train = np.concatenate(y_true_train, axis=0)
-            y_score_train = np.concatenate(y_score_train, axis=0)
-            y_score_train = y_score_train[:, 1]
-            y_pred_train = (y_score_train > 0.5)*1
+                        outputs = model(features_batch)
+                        loss = criterion(torch.squeeze(outputs[0]), labels_batch)
 
-            y_true_test = np.concatenate(y_true_test, axis=0)
-            y_score_test = np.concatenate(y_score_test, axis=0)
-            y_score_test = y_score_test[:, 1]
-            y_pred_test = (y_score_test > 0.5)*1
+                        y_true, y_score = get_y_true_and_pred(y_true=labels_batch, y_pred=outputs[0], cpu=True)
 
-            # create a clasification report of each split
-            roc_auc_test = roc_auc_score(y_true_test, y_score_test)
-            roc_auc_train = roc_auc_score(y_true_train, y_score_train)
+                        y_true_test.append(y_true)
+                        y_score_test.append(y_score)
 
-            train_report = classification_report(y_true_train, y_pred_train, output_dict=True, zero_division=0)
-            train_report['ROC AUC'] = roc_auc_train
-            train_report['kfold'] = kfold
-            train_report['loss'] = avg_train_loss
-            train_report['epoch'] = epoch
-            train_report['split'] = 'train'
+                        total_test_loss += loss.item()
 
-            test_report = classification_report(y_true_test, y_pred_test, output_dict=True, zero_division=0)
-            test_report['ROC AUC'] = roc_auc_test
-            test_report['kfold'] = kfold
-            test_report['loss'] = avg_test_loss
-            test_report['epoch'] = epoch
-            test_report['split'] = 'test'
+                scheduler.step()
+                avg_train_loss = total_train_loss / len(train_loader)
+                avg_test_loss = total_test_loss / len(test_loader)
 
-            print_classification_report(train_report)
-            print_classification_report(test_report)
+                batch_pbar.set_postfix({'Train Loss': avg_train_loss, 'Test Loss': avg_test_loss})
+                batch_pbar.update()
 
-            # save .pth model checkpoint
-            model.save_checkpoint(save_dir, epoch)
+                # generate y_true and y_pred for each split in the epoch
+                y_true_train = np.concatenate(y_true_train, axis=0)
+                y_score_train = np.concatenate(y_score_train, axis=0)
+                y_score_train = y_score_train[:, 1]
+                y_pred_train = (y_score_train > 0.5)*1
 
-            # save train and test clasification reports into a json file
-            with open(os.path.join(save_dir, f'train_metrics_{epoch}.json'), 'w') as file:
-                json.dump(train_report, file)
+                y_true_test = np.concatenate(y_true_test, axis=0)
+                y_score_test = np.concatenate(y_score_test, axis=0)
+                y_score_test = y_score_test[:, 1]
+                y_pred_test = (y_score_test > 0.5)*1
 
-            with open(os.path.join(save_dir, f'test_metrics_{epoch}.json'), 'w') as file:
-                json.dump(test_report, file)
+                # create a clasification report of each split
+                roc_auc_test = roc_auc_score(y_true_test, y_score_test)
+                roc_auc_train = roc_auc_score(y_true_train, y_score_train)
 
-            # save a plot of the train an test loss
-            train_metrics['kfold'].append(kfold)  # TODO: plot train and test report instead just loss values
-            train_metrics['epoch'].append(epoch)
-            train_metrics['train_loss'].append(avg_train_loss)
-            train_metrics['test_loss'].append(avg_test_loss)
-            df_loss = pd.DataFrame(train_metrics)
-            fig = plot_loss_metrics(df_loss)
-            fig.write_html(os.path.join(save_dir, 'losses.html'))
+                train_report = classification_report(y_true_train, y_pred_train, output_dict=True, zero_division=0)
+                train_report['ROC AUC'] = roc_auc_train
+                train_report['kfold'] = kfold
+                train_report['loss'] = avg_train_loss
+                train_report['epoch'] = epoch
+                train_report['split'] = 'train'
+
+                test_report = classification_report(y_true_test, y_pred_test, output_dict=True, zero_division=0)
+                test_report['ROC AUC'] = roc_auc_test
+                test_report['kfold'] = kfold
+                test_report['loss'] = avg_test_loss
+                test_report['epoch'] = epoch
+                test_report['split'] = 'test'
+
+                print_classification_report(train_report)
+                print_classification_report(test_report)
+
+                # save .pth model checkpoint
+                model.save_checkpoint(save_dir, epoch)
+
+                # save train and test clasification reports into a json file
+                with open(os.path.join(save_dir, f'train_metrics_{epoch}.json'), 'w') as file:
+                    json.dump(train_report, file)
+    
+                with open(os.path.join(save_dir, f'test_metrics_{epoch}.json'), 'w') as file:
+                    json.dump(test_report, file)
+
+                # save a plot of the train an test loss
+                train_metrics['kfold'].append(kfold)  # TODO: plot train and test report instead just loss values
+                train_metrics['epoch'].append(epoch)
+                train_metrics['train_loss'].append(avg_train_loss)
+                train_metrics['test_loss'].append(avg_test_loss)
+                df_loss = pd.DataFrame(train_metrics)
+                fig = plot_loss_metrics(df_loss)
+                fig.write_html(os.path.join(save_dir, 'losses.html'))
