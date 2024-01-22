@@ -156,6 +156,7 @@ class PETCTDataset3D(Dataset):
 
         feature_ids = self.dataframe_aug.loc[(patient_id, angle, flip)]['feature_id'].values
         features = []
+        masks = []
         with h5py.File(self.hdf5_path, 'r') as h5f:
             for feature_id in feature_ids:
                 slice_features = h5f[f'{patient_id}/features/{feature_id}'][()]
@@ -163,11 +164,13 @@ class PETCTDataset3D(Dataset):
                 slice_mask = resize(slice_mask_orig, slice_features.shape[0:2])
                 slice_mask = np.expand_dims(slice_mask, axis=-1)
                 features.append(slice_features*slice_mask)  # elementwise prod feature-mask
+                masks.append(slice_mask)
 
-        features = np.transpose(np.stack(features, axis=0), axes=(3, 0, 1, 2))  # shape = (feat_dim, slice, h, w)
+        features = np.transpose(np.stack(features, axis=0), axes=(3, 0, 1, 2))  # (slice, h, w, feat_dim)  -> (feat_dim, slice, h, w)
         if self.arch == 'transformer':
+            masks = np.transpose(np.stack(masks, axis=0), axes=(1, 2, 0, 3)) # (slice, h, w, 1)  -> (h, w, slice, 1)
             h_orig, w_orig = slice_mask_orig.shape[0:2]
-            features = np.transpose(np.stack(features, axis=0), axes=(2, 3, 1, 0))
+            features = np.transpose(np.stack(features, axis=0), axes=(2, 3, 1, 0))  # (h, w, slice, feat_dim)
             h_new, w_new = features.shape[2], features.shape[3]
             spatial_res = self.dataframe_aug.loc[(patient_id, angle, flip)]['spatial_res'].values[0]
             x, y, z = np.meshgrid(np.arange(0, features.shape[0]),
@@ -182,12 +185,13 @@ class PETCTDataset3D(Dataset):
             z = z - z.mean()
 
             pe = positional_encoding_3d(x, y, z, D=self.feature_dim, scale=100)
-            features = features.reshape(-1, self.feature_dim) + pe/10.0
-            
+            features = features.reshape(-1, self.feature_dim) + pe/10.0  # (seq_len, feat_dim)
+            features = features[masks.flatten(), :]  # (seq_len, feat_dim)
+
         labels = np.array(label)
         labels = np.expand_dims(labels, axis=-1)
         labels = self.label_encoder.transform(labels.reshape(-1, 1)).toarray()
-        
+
         features = torch.as_tensor(features, dtype=torch.float32)
         labels = torch.as_tensor(labels, dtype=torch.float32)
 
