@@ -30,7 +30,8 @@ class TransformerNoduleClassifier(nn.Module):
                                                    dim_feedforward=dim_feedforward,
                                                    nhead=num_heads,
                                                    activation="gelu",
-                                                   batch_first=True)
+                                                   batch_first=True,
+                                                   dropout=0.1)
         self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
         self.cls_token = nn.Parameter(torch.randn(1, 1, input_dim))
         self.classifier = nn.Linear(input_dim, num_classes)
@@ -63,23 +64,39 @@ class TransformerNoduleClassifier(nn.Module):
         self.load_state_dict(torch.load(model_path, map_location=device))
 
 
+class SELayer(nn.Module):
+    def __init__(self, channel, reduction=16):
+        super(SELayer, self).__init__()
+        self.avg_pool = nn.AdaptiveAvgPool3d(1)
+        self.fc = nn.Sequential(nn.Linear(channel, channel // reduction, bias=False),
+                                nn.ReLU(inplace=True),
+                                nn.Linear(channel // reduction, channel, bias=False),
+                                nn.Sigmoid())
+
+    def forward(self, x):
+        b, c, _, _, _ = x.size()
+        y = self.avg_pool(x).view(b, c)
+        y = self.fc(y).view(b, c, 1, 1, 1)
+        return x * y.expand_as(x)
+
+
 class NoduleClassifier(nn.Module):
     def __init__(self, input_dim, num_classes, div=2):
         super(NoduleClassifier, self).__init__()
-        # 3D conv layers
         self.conv1 = nn.Conv3d(in_channels=input_dim, out_channels=input_dim//div, kernel_size=3, padding=1)
+        self.se1 = SELayer(input_dim//div)
         self.conv2 = nn.Conv3d(in_channels=input_dim//div, out_channels=input_dim//(div*div), kernel_size=3, padding=1)
+        self.se2 = SELayer(input_dim//(div*div))
 
-        # fc layers
         self.fc1 = nn.Linear(input_dim//(div*div), input_dim//(div*div*div))
         self.fc2 = nn.Linear(input_dim//(div*div*div), num_classes)
 
     def forward(self, x):
-        # 3D conv layers
         x = F.relu(self.conv1(x))
+        x = self.se1(x)
         x = F.relu(self.conv2(x))
+        x = self.se2(x)
 
-        # Global Average Pooling 3D
         x = F.adaptive_avg_pool3d(x, (1, 1, 1))
         x = torch.flatten(x, 1)
         x = F.relu(self.fc1(x))
@@ -124,14 +141,14 @@ def positional_encoding_3d(x, y, z, D, scale=10):
 
 class PETCTDataset3D(Dataset):
     def __init__(self, dataframe, label_encoder, hdf5_path, use_augmentation=False, feature_dim=256, arch='conv'):
-        self.dataframe = dataframe.groupby(['patient_id'])[['modality', 'dataset', 'label']].first()
+        self.dataframe = dataframe.groupby(['patient_id_new'])[['modality', 'dataset', 'label', 'patient_id']].first()
         self.dataframe.reset_index(inplace=True, drop=False)
 
         self.use_augmentation = use_augmentation
         self.flips = list(dataframe['flip'].unique())
         self.angles = list(dataframe['angle'].unique())
 
-        self.dataframe_aug = dataframe.set_index(['patient_id', 'angle', 'flip'])
+        self.dataframe_aug = dataframe.set_index(['patient_id_new', 'angle', 'flip'])
         self.dataframe_aug = self.dataframe_aug.sort_index()
 
         self.hdf5_path = hdf5_path
@@ -144,6 +161,7 @@ class PETCTDataset3D(Dataset):
 
     def __getitem__(self, idx):
         sample = self.dataframe.iloc[idx]
+        patient_id_rew = sample.patient_id_new
         patient_id = sample.patient_id
         label = sample.label
 
@@ -154,9 +172,10 @@ class PETCTDataset3D(Dataset):
             flip = 'None'
             angle = 0
 
-        feature_ids = self.dataframe_aug.loc[(patient_id, angle, flip)]['feature_id'].values
+        feature_ids = self.dataframe_aug.loc[(patient_id_rew, angle, flip)]['feature_id'].values
         features = []
         masks = []
+
         with h5py.File(self.hdf5_path, 'r') as h5f:
             for feature_id in feature_ids:
                 slice_features = h5f[f'{patient_id}/features/{feature_id}'][()]
@@ -172,7 +191,7 @@ class PETCTDataset3D(Dataset):
             h_orig, w_orig = slice_mask_orig.shape[0:2]
             features = np.transpose(np.stack(features, axis=0), axes=(2, 3, 1, 0))  # (h, w, slice, feat_dim)
             h_new, w_new = features.shape[2], features.shape[3]
-            spatial_res = self.dataframe_aug.loc[(patient_id, angle, flip)]['spatial_res'].values[0]
+            spatial_res = self.dataframe_aug.loc[(patient_id_rew, angle, flip)]['spatial_res'].values[0]
             x, y, z = np.meshgrid(np.arange(0, features.shape[0]),
                                   np.arange(0, features.shape[1]),
                                   np.arange(0, features.shape[2]))
@@ -184,7 +203,7 @@ class PETCTDataset3D(Dataset):
             y = y - y.mean()
             z = z - z.mean()
 
-            pe = positional_encoding_3d(x, y, z, D=self.feature_dim, scale=100)
+            pe = positional_encoding_3d(x, y, z, D=self.feature_dim, scale=1000)
             features = features.reshape(-1, self.feature_dim) + pe/10.0  # (seq_len, feat_dim)
             features = features[masks.flatten(), :]  # (seq_len, feat_dim)
 
@@ -359,12 +378,49 @@ def get_sampler_weights(train_labels):
     weights = [1/weight_for_0 if lb == 0 else 1/weight_for_1 for lb in train_labels]
     return weights
 
+class FocalLoss(nn.Module):
+    def __init__(self, alpha=None, gamma=2):
+        super(FocalLoss, self).__init__()
+        self.alpha = alpha
+        self.gamma = gamma
 
+    def forward(self, inputs, targets):
+        # Convert one-hot encoded targets to class indices
+        if len(inputs.shape) == 1:
+            inputs = torch.unsqueeze(inputs, 0)
+            targets = torch.unsqueeze(targets, 0)
 
+        class_indices = torch.argmax(targets, dim=1)
+
+        # Compute cross-entropy loss
+        ce_loss = F.cross_entropy(inputs, class_indices, reduction='none')
+        pt = torch.exp(-ce_loss)
+
+        # Compute focal loss
+        if self.alpha is not None:
+            if not self.alpha.device == inputs.device:
+                self.alpha = self.alpha.to(inputs.device)
+            loss = (self.alpha[class_indices] * (1 - pt) ** self.gamma * ce_loss).mean()
+        else:
+            loss = ((1 - pt) ** self.gamma * ce_loss).mean()
+        
+        return loss
+    
+def find_divisor(slice_count, desired_slices=7):
+    if slice_count < desired_slices:
+        return 1
+    else:
+        for divisor in range(desired_slices, slice_count + 1):
+            if slice_count % divisor == 0 or slice_count % divisor >= desired_slices:
+                return divisor
+        return 1
+    
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train 3D transoformer or CNN for lung nodules clasification")
     parser.add_argument("-a", "--arch", type=str, default="transformer",
                         help="'transformer' or 'conv'")
+    parser.add_argument("-d", "--dataset", type=str, default="all",
+                        help="dataset 'stanford', 'santa_maria' or 'all'")
     parser.add_argument("-b", "--backbone", type=str, default="medsam",
                         help="backbone ViT encoder 'medsam' or 'dinov2'")
     parser.add_argument("-m", "--modality", type=str, default="ct",
@@ -375,20 +431,34 @@ if __name__ == "__main__":
     arch = args.arch
     backbone = args.backbone
     modality = args.modality
-
-    desired_datasets = ['stanford', 'santa_maria']
+    use_sampler = True
+    arg_dataset = args.dataset
+    if arg_dataset == 'all':
+        desired_datasets = ['stanford', 'santa_maria']
+    else:
+        desired_datasets = [arg_dataset]
+        
     hdf5_path = os.path.join('..', 'data', 'features', f'features_masks_{modality}.hdf5')
     df_path = os.path.join('..', 'data', 'features', 'petct.parquet')
     #models_save_dir = os.path.join('..', 'models', 'petct')  # TODO:  generate an unique experiment ID
-    models_save_dir = os.path.join('..', 'models', 'petct', f'{backbone}_{arch}')
+    models_save_dir = os.path.join('..', 'models', 'petct', f'{backbone}_{arch}_{arg_dataset}')
 
     # load dataframe and apply some filter criteria
     df = pd.read_parquet(df_path)
-    df['dataset'].isin(desired_datasets)
+    df= df[df['dataset'].isin(desired_datasets)]
     df = df[df['modality'] == modality]
     df['flip'] = df['flip'].astype(str)
     df.reset_index(drop=True, inplace=True)
-
+    
+    df['divisor'] = 1
+    slices_per_patient = df.groupby(['patient_id'])['slice', 'divisor'].max()
+    slices_per_patient.describe()
+    slices_per_patient['divisor'] = slices_per_patient['slice'].apply(find_divisor)
+    slices_per_patient = slices_per_patient['divisor'].to_dict()
+    df['divisor'] = df['patient_id'].apply(lambda x: slices_per_patient[x])
+    
+    df['patient_id_new'] = df.apply(lambda row: f"{row['patient_id']}:{np.ceil(row['slice']/row['divisor']).astype(int)}", axis=1)
+    df.groupby('patient_id_new')['label'].describe()
     # create labelmap and onehot enconder for nodule EGFR mutation
     EGFR_names = list(df['label'].unique())
     EGFR_names.sort()
@@ -451,15 +521,27 @@ if __name__ == "__main__":
                 num_heads = 12
                 dim_feedforward = feature_dim*2
     
-        else:  # TODO: PET create CNN arch for PET
-            batch_size = 32
+        else:
+            batch_size = 1  # TODO: add support for bigger batches using zero padding to create batches of the same size
             start_epoch = 0
-            num_epochs = 35
-            feature_dim = 256
+            num_epochs = 25
             learning_rate = 0.0001
-            num_layers = 3
-            num_heads = 4
-            dim_feedforward = feature_dim*4
+            num_layers = 1
+    
+            if backbone == 'medsam':
+                feature_dim = 256
+                div = 2  # reduction factor of the conv layers
+    
+                # FIXME: deprecated transformer params
+                num_heads = 8
+                dim_feedforward = feature_dim*4
+    
+            else:  # dinov2
+                feature_dim = 384
+                div = 3  # reduction factor of the conv layers
+                # FIXME: deprecated transformer params
+                num_heads = 12
+                dim_feedforward = feature_dim*2
 
         # Create model instance
         device = f'cuda:{torch.cuda.current_device()}'
@@ -476,11 +558,18 @@ if __name__ == "__main__":
         model = model.to(device)
 
         # CrossEntropyLoss because the last layer has one output per class (mutant, wildtype)
-        criterion = nn.CrossEntropyLoss()
 
+        label_mean = np.array(patients_labels).mean()
+        loss_weights = torch.tensor([label_mean, (1-label_mean)]).to(device)
+        #criterion = nn.CrossEntropyLoss(weight=loss_weights)
+        #criterion = nn.CrossEntropyLoss()
+        if modality=='ct':
+            criterion = FocalLoss(alpha=torch.tensor([0.4, 0.6]).to(device), gamma=1.5)
+        else:
+            criterion = nn.CrossEntropyLoss()
         #optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
         optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=0.01, amsgrad=False)
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs, eta_min=0.001)
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs, eta_min=0.00001)
 
         # create datasets
         train_dataset = PETCTDataset3D(df_train,
@@ -493,17 +582,28 @@ if __name__ == "__main__":
         test_dataset = PETCTDataset3D(df_test,
                                       label_encoder=EGFR_encoder,
                                       hdf5_path=hdf5_path,
+                                      use_augmentation=False,
                                       feature_dim=feature_dim,
                                       arch=arch)
 
         # create a sampler to balance training classes proportion
-        num_samples = len(train_dataset)
-        train_labels = np.array(list(train_dataset.dataframe.label.values))
-        sampler_weights = get_sampler_weights(train_labels)
-        sampler = WeightedRandomSampler(sampler_weights, num_samples, replacement=True)
-
-        # create data loaders
-        train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=False, sampler=sampler)
+        if use_sampler:
+            num_samples = len(train_dataset)
+            train_labels = np.array(list(train_dataset.dataframe.label.values))
+            sampler_weights = get_sampler_weights(train_labels)
+            sampler = WeightedRandomSampler(sampler_weights, num_samples, replacement=True)
+    
+            # create data loaders
+            train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=False, sampler=sampler)
+        else:
+            train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+            
+        """
+        test_labels = np.array(list(test_dataset.dataframe.label.values))
+        test_sampler_weights = get_sampler_weights(test_labels)
+        sample_test = WeightedRandomSampler(test_sampler_weights, len(test_dataset)*2, replacement=True)
+        test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, sampler=sample_test)
+        """
         test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
 
         with tqdm(total=num_epochs, desc='epoch', position=1, leave=False) as batch_pbar:
@@ -520,26 +620,30 @@ if __name__ == "__main__":
 
                 # train loop
                 model.train()
+                optimizer.zero_grad()
+                i = 0
+                iters_to_accumulate = 16
                 for features_batch, labels_batch in tqdm(train_loader, position=2, desc='train batch'):
                     features_batch = features_batch.to(device)
 
                     labels_batch = torch.squeeze(labels_batch).to(device)
 
-                    optimizer.zero_grad()
                     outputs = model(features_batch)
 
-                    loss = criterion(torch.squeeze(outputs[0]), labels_batch)
-
+                    loss = criterion(torch.squeeze(outputs[0]), labels_batch) / iters_to_accumulate
                     y_true, y_score = get_y_true_and_pred(y_true=labels_batch, y_pred=outputs[0], cpu=True)
 
                     y_true_train.append(y_true)
                     y_score_train.append(y_score)
 
-                    total_train_loss += loss.item()
+                    total_train_loss += loss.item()  * iters_to_accumulate
 
                     loss.backward()
-                    optimizer.step()
 
+                    if (i + 1) % iters_to_accumulate == 0 or i + 1 == len(train_loader):
+                        optimizer.step()
+                        optimizer.zero_grad()
+                    i += 1
                 # test loop
                 model.eval()
                 with torch.no_grad():
@@ -612,5 +716,16 @@ if __name__ == "__main__":
                 train_metrics['train_loss'].append(avg_train_loss)
                 train_metrics['test_loss'].append(avg_test_loss)
                 df_loss = pd.DataFrame(train_metrics)
+                df_loss = df_loss[df_loss['kfold'] == kfold]
+                df_loss['loss_diff'] = df_loss['train_loss'] - df_loss['test_loss']
                 fig = plot_loss_metrics(df_loss)
                 fig.write_html(os.path.join(save_dir, 'losses.html'))
+            
+                # early stoping
+                patience = 5
+                df_loss['is_improvement'] = df_loss['test_loss'] < df_loss['test_loss'].cummin()
+                df_loss['epochs_since_improvement'] = (~df_loss['is_improvement']).cumsum()
+
+                if df_loss['epochs_since_improvement'].iloc[-1] >= patience:
+                    print(f"Early stopping triggered after {epoch + 1} epochs")
+                    break
