@@ -140,7 +140,7 @@ def positional_encoding_3d(x, y, z, D, scale=10):
 
 
 class PETCTDataset3D(Dataset):
-    def __init__(self, dataframe, label_encoder, hdf5_path, use_augmentation=False, feature_dim=256, arch='conv'):
+    def __init__(self, dataframe, label_encoder, hdf5_path, use_augmentation=False, feature_dim=256, arch='conv', self_supervised=True):
         self.dataframe = dataframe.groupby(['patient_id_new'])[['modality', 'dataset', 'label', 'patient_id']].first()
         self.dataframe.reset_index(inplace=True, drop=False)
 
@@ -155,6 +155,7 @@ class PETCTDataset3D(Dataset):
         self.label_encoder = label_encoder
         self.feature_dim = feature_dim
         self.arch = arch
+        self.self_supervised = self_supervised
 
     def __len__(self):
         return len(self.dataframe)
@@ -172,6 +173,18 @@ class PETCTDataset3D(Dataset):
             flip = 'None'
             angle = 0
 
+        features = self._get_features(patient_id, patient_id_rew, angle, flip)
+
+        labels = np.array(label)
+        labels = np.expand_dims(labels, axis=-1)
+        labels = self.label_encoder.transform(labels.reshape(-1, 1)).toarray()
+
+        features = torch.as_tensor(features, dtype=torch.float32)
+        labels = torch.as_tensor(labels, dtype=torch.float32)
+
+        return features, labels
+
+    def _get_features(self, patient_id, patient_id_rew, angle, flip):
         feature_ids = self.dataframe_aug.loc[(patient_id_rew, angle, flip)]['feature_id'].values
         features = []
         masks = []
@@ -187,7 +200,7 @@ class PETCTDataset3D(Dataset):
 
         features = np.transpose(np.stack(features, axis=0), axes=(3, 0, 1, 2))  # (slice, h, w, feat_dim)  -> (feat_dim, slice, h, w)
         if self.arch == 'transformer':
-            masks = np.transpose(np.stack(masks, axis=0), axes=(1, 2, 0, 3)) # (slice, h, w, 1)  -> (h, w, slice, 1)
+            masks = np.transpose(np.stack(masks, axis=0), axes=(1, 2, 0, 3))  # (slice, h, w, 1)  -> (h, w, slice, 1)
             h_orig, w_orig = slice_mask_orig.shape[0:2]
             features = np.transpose(np.stack(features, axis=0), axes=(2, 3, 1, 0))  # (h, w, slice, feat_dim)
             h_new, w_new = features.shape[2], features.shape[3]
@@ -195,10 +208,10 @@ class PETCTDataset3D(Dataset):
             x, y, z = np.meshgrid(np.arange(0, features.shape[0]),
                                   np.arange(0, features.shape[1]),
                                   np.arange(0, features.shape[2]))
-            x = (x.flatten()/w_new) *w_orig * spatial_res[0]
+            x = (x.flatten()/w_new) * w_orig * spatial_res[0]
             y = (y.flatten()/h_new).flatten() * h_orig * spatial_res[1]
             z = (z.flatten()).flatten() * spatial_res[2]
-  
+
             x = x - x.mean()
             y = y - y.mean()
             z = z - z.mean()
@@ -206,15 +219,7 @@ class PETCTDataset3D(Dataset):
             pe = positional_encoding_3d(x, y, z, D=self.feature_dim, scale=1000)
             features = features.reshape(-1, self.feature_dim) + pe/10.0  # (seq_len, feat_dim)
             features = features[masks.flatten(), :]  # (seq_len, feat_dim)
-
-        labels = np.array(label)
-        labels = np.expand_dims(labels, axis=-1)
-        labels = self.label_encoder.transform(labels.reshape(-1, 1)).toarray()
-
-        features = torch.as_tensor(features, dtype=torch.float32)
-        labels = torch.as_tensor(labels, dtype=torch.float32)
-
-        return features, labels
+        return features
 
 
 def print_classification_report(report, global_metrics=None):
