@@ -379,7 +379,7 @@ if __name__ == "__main__":
         patient_ids = list(patient_ct.intersection(patient_pet))
 
         for patient_id in tqdm(patient_ids, desc=dataset_name):
-            for modality in ['ct']:
+            for modality in ['pet', 'ct']:
                 df_path = os.path.join(features_dir, f'{patient_id}_{modality}.parquet')
                 features_file = os.path.join(feature_folder, f'features_masks_{modality}.hdf5')
                 if not os.path.exists(df_path):
@@ -403,7 +403,7 @@ if __name__ == "__main__":
                             else:
                                 img_raw = hu_to_rgb_vectorized(img_raw) / 255.0
                         else:
-                            pass  # TODO: define a preprocess for PET images
+                            img_raw = img_raw / img_raw.max()
 
                         # extract patch features of each slice
                         df = {'slice': [],
