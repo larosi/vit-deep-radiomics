@@ -7,6 +7,7 @@ Created on Sun Jan 21 15:25:38 2024
 
 import os
 import pandas as pd
+import numpy as np
 
 if __name__ == "__main__":
     datasets = ['santa_maria_dataset', 'stanford_dataset']
@@ -24,5 +25,6 @@ if __name__ == "__main__":
                 df.append(df_aux)
     df = pd.concat(df)
     df['flip'] = df['flip'].astype(str)
+    df['augmentation'] = np.logical_not(np.logical_and(df['flip'] == 'None', df['angle'] == 0))
     df.reset_index(drop=True, inplace=True)
     df.to_parquet(output_path)
