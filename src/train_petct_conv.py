@@ -155,7 +155,6 @@ class PETCTDataset3D(Dataset):
         self.label_encoder = label_encoder
         self.feature_dim = feature_dim
         self.arch = arch
-        self.self_supervised = self_supervised
 
     def __len__(self):
         return len(self.dataframe)
