@@ -2,5 +2,6 @@
 data/*
 models/*
 metrics/*
+plots/*
 .spyproject/*
 *__pycache__*
