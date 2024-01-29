@@ -67,16 +67,18 @@ if __name__ == "__main__":
             df_metrics_group = df_metrics.set_index(['kfold', 'epoch'])
 
             fig = px.line(df_metrics[df_metrics['index'] == 'recall'].sort_values('epoch'),
-                          x='epoch', y='loss', color='split', animation_frame='kfold', title=experiment, markers=True)
+                          x='epoch', y='loss', color='split', animation_frame='kfold',
+                          title=experiment, markers=True)
             fig.update_yaxes(range=[0, df_metrics['loss'].max()+0.1])
             fig.update_xaxes(range=[0, df_metrics['epoch'].max()+1])
-            fig.write_html(os.path.join('..', 'plots', f'{experiment}-{modality}-training_loss.html'))
+            fig.write_html(os.path.join('..', 'plots', 'training', f'{experiment}-{modality}-training_loss.html'))
 
             fig = px.line(df_metrics[df_metrics['index'] == 'recall'].sort_values('epoch'),
-                          x='epoch', y='accuracy', color='split', animation_frame='kfold', title=experiment, markers=True)
+                          x='epoch', y='accuracy', color='split', animation_frame='kfold',
+                          title=experiment, markers=True)
             fig.update_yaxes(range=[0, df_metrics['accuracy'].max()+0.1])
             fig.update_xaxes(range=[0, df_metrics['epoch'].max()+1])
-            fig.write_html(os.path.join('..', 'plots', f'{experiment}-{modality}-training_accuracy.html'))
+            fig.write_html(os.path.join('..', 'plots', 'training', f'{experiment}-{modality}-training_accuracy.html'))
 
             # select the best model of each kfold based on a target metric
             df_best = df_metrics.copy()
