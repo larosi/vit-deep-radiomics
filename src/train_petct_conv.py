@@ -42,7 +42,7 @@ class TransformerNoduleClassifier(nn.Module):
         x = torch.cat([cls_token, x], dim=1)
 
         x = self.transformer_encoder(x)
-        return self.classifier(x[:,0,:]), x
+        return self.classifier(x[:,0,:]), x[:,0,:]
 
     def save_checkpoint(self, save_dir, epoch):
         if not os.path.exists(save_dir):
@@ -89,7 +89,7 @@ class NoduleClassifier(nn.Module):
         self.se2 = SELayer(input_dim//(div*div))
 
         self.fc1 = nn.Linear(input_dim//(div*div), input_dim//(div*div*div))
-        self.fc2 = nn.Linear(input_dim//(div*div*div), num_classes)
+        self.classifier = nn.Linear(input_dim//(div*div*div), num_classes)
 
     def forward(self, x):
         x = F.relu(self.conv1(x))
@@ -101,7 +101,7 @@ class NoduleClassifier(nn.Module):
         x = torch.flatten(x, 1)
         x = F.relu(self.fc1(x))
 
-        return self.fc2(x), x
+        return self.classifier(x), x
 
     def save_checkpoint(self, save_dir, epoch):
         if not os.path.exists(save_dir):
@@ -140,13 +140,13 @@ def positional_encoding_3d(x, y, z, D, scale=10):
 
 
 class PETCTDataset3D(Dataset):
-    def __init__(self, dataframe, label_encoder, hdf5_path, use_augmentation=False, feature_dim=256, arch='conv', self_supervised=True):
+    def __init__(self, dataframe, label_encoder, hdf5_path, use_augmentation=False, feature_dim=256, arch='conv'):
         self.dataframe = dataframe.groupby(['patient_id_new'])[['modality', 'dataset', 'label', 'patient_id']].first()
         self.dataframe.reset_index(inplace=True, drop=False)
 
         self.use_augmentation = use_augmentation
-        self.flips = list(dataframe['flip'].unique())
-        self.angles = list(dataframe['angle'].unique())
+
+        self.flip_angles = dataframe.groupby(['flip', 'angle'], as_index=False).size()[['flip', 'angle']]
 
         self.dataframe_aug = dataframe.set_index(['patient_id_new', 'angle', 'flip'])
         self.dataframe_aug = self.dataframe_aug.sort_index()
@@ -167,19 +167,17 @@ class PETCTDataset3D(Dataset):
         label = sample.label
 
         if self.use_augmentation:
-            flip = np.random.choice(self.flips)
-            angle = np.random.choice(self.angles)
+            [flip, angle] = self.flip_angles.sample(n=1).values
         else:
             flip = 'None'
             angle = 0
 
         features = self._get_features(patient_id, patient_id_rew, angle, flip)
+        features = torch.as_tensor(features, dtype=torch.float32)
 
         labels = np.array(label)
         labels = np.expand_dims(labels, axis=-1)
         labels = self.label_encoder.transform(labels.reshape(-1, 1)).toarray()
-
-        features = torch.as_tensor(features, dtype=torch.float32)
         labels = torch.as_tensor(labels, dtype=torch.float32)
 
         return features, labels
@@ -212,12 +210,12 @@ class PETCTDataset3D(Dataset):
             y = (y.flatten()/h_new).flatten() * h_orig * spatial_res[1]
             z = (z.flatten()).flatten() * spatial_res[2]
 
-            x = x - x.mean()
-            y = y - y.mean()
-            z = z - z.mean()
+            x = x - x.mean() + np.random.random(1) * 5 - 2.5
+            y = y - y.mean() + np.random.random(1) * 5 - 2.5
+            z = z - z.mean() + np.random.random(1) * 5 - 2.5
 
             pe = positional_encoding_3d(x, y, z, D=self.feature_dim, scale=1000)
-            features = features.reshape(-1, self.feature_dim) + pe/10.0  # (seq_len, feat_dim)
+            features = features.reshape(-1, self.feature_dim) + pe / 2 # (seq_len, feat_dim)
             features = features[masks.flatten(), :]  # (seq_len, feat_dim)
         return features
 
@@ -538,8 +536,8 @@ if __name__ == "__main__":
                 div = 2  # reduction factor of the conv layers
     
                 # FIXME: deprecated transformer params
-                num_heads = 8
-                dim_feedforward = feature_dim*4
+                num_heads = 16
+                dim_feedforward = feature_dim*2
     
             else:  # dinov2
                 feature_dim = 384
@@ -563,16 +561,7 @@ if __name__ == "__main__":
         model = model.to(device)
 
         # CrossEntropyLoss because the last layer has one output per class (mutant, wildtype)
-
-        label_mean = np.array(patients_labels).mean()
-        loss_weights = torch.tensor([label_mean, (1-label_mean)]).to(device)
-        #criterion = nn.CrossEntropyLoss(weight=loss_weights)
-        #criterion = nn.CrossEntropyLoss()
-        if modality=='ct':
-            criterion = FocalLoss(alpha=torch.tensor([0.4, 0.6]).to(device), gamma=1.5)
-        else:
-            criterion = nn.CrossEntropyLoss()
-        #optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+        criterion = nn.CrossEntropyLoss()
         optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=0.01, amsgrad=False)
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs, eta_min=0.00001)
 
@@ -593,23 +582,19 @@ if __name__ == "__main__":
 
         # create a sampler to balance training classes proportion
         if use_sampler:
-            num_samples = len(train_dataset)
             train_labels = np.array(list(train_dataset.dataframe.label.values))
             sampler_weights = get_sampler_weights(train_labels)
-            sampler = WeightedRandomSampler(sampler_weights, num_samples, replacement=True)
-    
+            sampler = WeightedRandomSampler(sampler_weights, len(train_dataset), replacement=True)
+
+            test_labels = np.array(list(test_dataset.dataframe.label.values))
+            test_sampler_weights = get_sampler_weights(test_labels)
+            sample_test = WeightedRandomSampler(test_sampler_weights, len(test_dataset)*2, replacement=True)
             # create data loaders
             train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=False, sampler=sampler)
+            test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, sampler=sample_test)
         else:
             train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-            
-        """
-        test_labels = np.array(list(test_dataset.dataframe.label.values))
-        test_sampler_weights = get_sampler_weights(test_labels)
-        sample_test = WeightedRandomSampler(test_sampler_weights, len(test_dataset)*2, replacement=True)
-        test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, sampler=sample_test)
-        """
-        test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
+            test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
 
         with tqdm(total=num_epochs, desc='epoch', position=1, leave=False) as batch_pbar:
             for epoch in range(start_epoch, start_epoch+num_epochs):
@@ -627,7 +612,7 @@ if __name__ == "__main__":
                 model.train()
                 optimizer.zero_grad()
                 i = 0
-                iters_to_accumulate = 16
+                iters_to_accumulate = 1
                 for features_batch, labels_batch in tqdm(train_loader, position=2, desc='train batch'):
                     features_batch = features_batch.to(device)
 
@@ -641,7 +626,7 @@ if __name__ == "__main__":
                     y_true_train.append(y_true)
                     y_score_train.append(y_score)
 
-                    total_train_loss += loss.item()  * iters_to_accumulate
+                    total_train_loss += loss.item() * iters_to_accumulate
 
                     loss.backward()
 
@@ -711,7 +696,7 @@ if __name__ == "__main__":
                 # save train and test clasification reports into a json file
                 with open(os.path.join(save_dir, f'train_metrics_{epoch}.json'), 'w') as file:
                     json.dump(train_report, file)
-    
+
                 with open(os.path.join(save_dir, f'test_metrics_{epoch}.json'), 'w') as file:
                     json.dump(test_report, file)
 
@@ -722,13 +707,13 @@ if __name__ == "__main__":
                 train_metrics['test_loss'].append(avg_test_loss)
                 df_loss = pd.DataFrame(train_metrics)
                 df_loss = df_loss[df_loss['kfold'] == kfold]
-                df_loss['loss_diff'] = df_loss['train_loss'] - df_loss['test_loss']
+
                 fig = plot_loss_metrics(df_loss)
                 fig.write_html(os.path.join(save_dir, 'losses.html'))
-            
+
                 # early stoping
-                patience = 5
-                df_loss['is_improvement'] = df_loss['test_loss'] < df_loss['test_loss'].cummin()
+                patience = 8
+                df_loss['is_improvement'] = df_loss['test_loss'] <= df_loss['test_loss'].cummin()
                 df_loss['epochs_since_improvement'] = (~df_loss['is_improvement']).cumsum()
 
                 if df_loss['epochs_since_improvement'].iloc[-1] >= patience:
