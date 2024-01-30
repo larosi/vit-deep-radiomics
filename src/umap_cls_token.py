@@ -37,7 +37,7 @@ for arch in archs:
             all_experiments.append((arch, arg_dataset, modality))
 
 # all_experiments = ['transformer', 'stanford', 'ct']
-
+df_all_models = []
 for arch, arg_dataset, modality in all_experiments:
     df_metrics_path = os.path.join('..', 'metrics', 'petct_metrics_sumary.csv')
     hdf5_path = os.path.join('..', 'data', 'features', f'features_masks_{modality}.hdf5')
@@ -53,7 +53,10 @@ for arch, arg_dataset, modality in all_experiments:
     df['divisor'] = 1
     slices_per_patient = df.groupby(['patient_id'])['slice', 'divisor'].max()
     slices_per_patient.describe()
-    slices_per_patient['divisor'] = slices_per_patient['slice'].apply(find_divisor)
+    if modality == 'ct':
+        slices_per_patient['divisor'] = slices_per_patient['slice'].apply(find_divisor, desired_slices=7)
+    else:
+        slices_per_patient['divisor'] = slices_per_patient['slice'].apply(find_divisor, desired_slices=2)
     slices_per_patient = slices_per_patient['divisor'].to_dict()
     df['divisor'] = df['patient_id'].apply(lambda x: slices_per_patient[x])
 
@@ -86,8 +89,8 @@ for arch, arg_dataset, modality in all_experiments:
         num_heads = 8
         dim_feedforward = feature_dim*4
     else:
-        num_heads = 16
-        dim_feedforward = feature_dim*2
+        num_heads = 4
+        dim_feedforward = feature_dim*4
 
     # Create model instance
     device = f'cuda:{torch.cuda.current_device()}'
@@ -141,13 +144,23 @@ for arch, arg_dataset, modality in all_experiments:
     df_umap = pd.DataFrame()
     df_umap['y_true'] = y_true
     df_umap['y_pred'] = y_pred
+    df_umap['y_score'] = y_score[:, 1] 
     df_umap['y_true'] = df_umap['y_true'].astype(str)
     df_umap['y_pred'] = df_umap['y_pred'].astype(str)
 
     df_umap[['umap_x', 'umap_y', 'umap_z']] = umap_features
-    df_umap['id'] = df['patient_id_new'].unique()
-    df_umap['id'] = df_umap['id'].str.split(':').str[0]
+    df_umap['patient_id_new'] = df['patient_id_new'].unique()
+    df_umap['patient_id'] = df_umap['patient_id_new'].str.split(':').str[0]
+    df_umap['modality'] = modality 
+    df_umap['arch'] = arch
+    df_umap['dataset'] = arg_dataset
 
-    fig = px.scatter_3d(df_umap, x='umap_x', y='umap_y', z='umap_z', color='y_true', symbol='id',
+    fig = px.scatter_3d(df_umap, x='umap_x', y='umap_y', z='umap_z', color='y_true', symbol='patient_id',
                         title=f'{backbone} {arch}<br>{arg_dataset} {modality}')
     fig.write_html(os.path.join('..', 'plots', 'umap', f'{backbone}_{arch}_{arg_dataset}_{modality}_umap.html'))
+
+    df_umap['embeddings'] = list(embeddings)
+    df_all_models.append(df_umap)
+
+df_all_models = pd.concat(df_all_models)
+df_all_models.to_parquet(os.path.join('..','data','petct_embeddings_umap.parquet'))
