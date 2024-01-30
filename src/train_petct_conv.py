@@ -32,15 +32,16 @@ class TransformerNoduleClassifier(nn.Module):
                                                    activation="gelu",
                                                    batch_first=True,
                                                    dropout=0.1)
+        self.norm = nn.LayerNorm(input_dim)
         self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
         self.cls_token = nn.Parameter(torch.randn(1, 1, input_dim))
-        self.classifier = nn.Linear(input_dim, num_classes)
+        self.classifier = MLPLayer(input_dim, input_dim*2, num_classes)
 
-    def forward(self, x, attention_mask=None):
+    def forward(self, x):
         batch, seq_len, feature_dim = x.shape
         cls_token = self.cls_token.repeat(batch, 1, 1)
         x = torch.cat([cls_token, x], dim=1)
-
+        x = self.norm(x)
         x = self.transformer_encoder(x)
         return self.classifier(x[:,0,:]), x[:,0,:]
 
@@ -62,6 +63,22 @@ class TransformerNoduleClassifier(nn.Module):
     def load(self, model_path):
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.load_state_dict(torch.load(model_path, map_location=device))
+
+class MLPLayer(nn.Module):
+    def __init__(self, input_dim, hidden_features, out_features, dropout_rate=0.1):
+        super(MLPLayer, self).__init__()
+        self.dense1 = nn.Linear(input_dim, hidden_features, bias=True)
+        self.dropout = nn.Dropout(dropout_rate)
+        self.activation = nn.GELU()
+        self.dense2 = nn.Linear(hidden_features, out_features, bias=True)
+
+    def forward(self, x):
+        x = self.dense1(x)
+        x = self.activation(x)
+        x = self.dropout(x)
+        x = self.dense2(x)
+        x = self.dropout(x)
+        return x
 
 
 class SELayer(nn.Module):
@@ -88,8 +105,8 @@ class NoduleClassifier(nn.Module):
         self.conv2 = nn.Conv3d(in_channels=input_dim//div, out_channels=input_dim//(div*div), kernel_size=3, padding=1)
         self.se2 = SELayer(input_dim//(div*div))
 
-        self.fc1 = nn.Linear(input_dim//(div*div), input_dim//(div*div*div))
-        self.classifier = nn.Linear(input_dim//(div*div*div), num_classes)
+        self.fc1 = nn.Linear(input_dim//(div*div), input_dim)
+        self.classifier = MLPLayer(input_dim, input_dim*2, num_classes)
 
     def forward(self, x):
         x = F.relu(self.conv1(x))
@@ -166,7 +183,7 @@ class PETCTDataset3D(Dataset):
         label = sample.label
 
         if self.use_augmentation:
-            [flip, angle] = self.flip_angles.sample(n=1).values
+            [[flip, angle]] = self.flip_angles.sample(n=1).values
         else:
             flip = 'None'
             angle = 0
@@ -195,9 +212,9 @@ class PETCTDataset3D(Dataset):
                 features.append(slice_features*slice_mask)  # elementwise prod feature-mask
                 masks.append(slice_mask)
 
-        features = np.transpose(np.stack(features, axis=0), axes=(3, 0, 1, 2))  # (slice, h, w, feat_dim)  -> (feat_dim, slice, h, w)
+        features = np.transpose(np.stack(features, axis=0), axes=(3, 0, 1, 2))  # (slice, h, w, feat_dim) -> (feat_dim, slice, h, w)
         if self.arch == 'transformer':
-            masks = np.transpose(np.stack(masks, axis=0), axes=(1, 2, 0, 3))  # (slice, h, w, 1)  -> (h, w, slice, 1)
+            masks = np.transpose(np.stack(masks, axis=0), axes=(1, 2, 0, 3))  # (slice, h, w, 1) -> (h, w, slice, 1)
             h_orig, w_orig = slice_mask_orig.shape[0:2]
             features = np.transpose(np.stack(features, axis=0), axes=(2, 3, 1, 0))  # (h, w, slice, feat_dim)
             h_new, w_new = features.shape[2], features.shape[3]
