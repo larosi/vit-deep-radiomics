@@ -438,11 +438,11 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train 3D transoformer or CNN for lung nodules clasification")
     parser.add_argument("-a", "--arch", type=str, default="transformer",
                         help="'transformer' or 'conv'")
-    parser.add_argument("-d", "--dataset", type=str, default="all",
+    parser.add_argument("-d", "--dataset", type=str, default="santa_maria",
                         help="dataset 'stanford', 'santa_maria' or 'all'")
     parser.add_argument("-b", "--backbone", type=str, default="medsam",
                         help="backbone ViT encoder 'medsam' or 'dinov2'")
-    parser.add_argument("-m", "--modality", type=str, default="ct",
+    parser.add_argument("-m", "--modality", type=str, default="pet",
                         help="ct or pet")
 
     args = parser.parse_args()
@@ -472,7 +472,10 @@ if __name__ == "__main__":
     df['divisor'] = 1
     slices_per_patient = df.groupby(['patient_id'])['slice', 'divisor'].max()
     slices_per_patient.describe()
-    slices_per_patient['divisor'] = slices_per_patient['slice'].apply(find_divisor)
+    if modality == 'ct':
+        slices_per_patient['divisor'] = slices_per_patient['slice'].apply(find_divisor, desired_slices=7)
+    else:
+        slices_per_patient['divisor'] = slices_per_patient['slice'].apply(find_divisor, desired_slices=2)
     slices_per_patient = slices_per_patient['divisor'].to_dict()
     df['divisor'] = df['patient_id'].apply(lambda x: slices_per_patient[x])
     
@@ -552,8 +555,8 @@ if __name__ == "__main__":
                 div = 2  # reduction factor of the conv layers
     
                 # FIXME: deprecated transformer params
-                num_heads = 16
-                dim_feedforward = feature_dim*2
+                num_heads = 4
+                dim_feedforward = feature_dim*4
     
             else:  # dinov2
                 feature_dim = 384
