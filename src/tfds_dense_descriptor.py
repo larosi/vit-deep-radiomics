@@ -394,7 +394,7 @@ if __name__ == "__main__":
 
                     label = label[0]
                     if label not in [0, 1]:  # ignore unknown (2) and not collected (3) labels
-                        print(f'nWarning: skip {patient_id} with label {label}')
+                        print(f'\nWarning: skip {patient_id} with label {label}')
                     else:
                         nodule_pixels = mask_raw.sum(axis=(0, 1)).round(2)
                         if not nodule_pixels.max():
