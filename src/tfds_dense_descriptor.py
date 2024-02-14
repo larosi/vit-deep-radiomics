@@ -188,6 +188,9 @@ def tfds2voxels(ds, patient_id, pet=False):
     img = np.dstack(img)
     mask = np.dstack(mask)
     spatial_res = sample['exam_metadata']['space_directions'].numpy()
+    if spatial_res.min() <= 0:
+        spatial_res = np.repeat(spatial_res.max(), spatial_res.shape)
+        print(f'\nWarning: {patient_id} has null voxel resolution')
     return img, mask, label, spatial_res
 
 
