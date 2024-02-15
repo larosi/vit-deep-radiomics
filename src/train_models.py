@@ -441,7 +441,9 @@ if __name__ == "__main__":
                      'train_loss': [],
                      'test_loss': [],
                      'train_auc': [],
-                     'test_auc': []}
+                     'test_auc': [],
+                     'train_report': [],
+                     'test_report': []}
 
     # use KFold to split patients stratified by label
     folds = list(cfg['kfold_patients'][arg_dataset].keys())
@@ -643,11 +645,11 @@ if __name__ == "__main__":
                 train_metrics['test_loss'].append(avg_test_loss)
                 train_metrics['train_auc'].append(roc_auc_train)
                 train_metrics['test_auc'].append(roc_auc_test)
+                train_metrics['train_report'].append(train_report_str.replace('\n', '<br>').replace(' ', '  '))
+                train_metrics['test_report'].append(test_report_str.replace('\n', '<br>').replace(' ', '  '))
 
                 df_loss = pd.DataFrame(train_metrics)
                 df_loss = df_loss[df_loss['kfold'] == kfold]
-                df_loss['train_report'] = train_report_str.replace('\n', '<br>').replace(' ', '  ')
-                df_loss['test_report'] = test_report_str.replace('\n', '<br>').replace(' ', '  ')
 
                 fig = plot_loss_metrics(df_loss, title=f'{arg_dataset} fold {kfold}')
                 fig.write_html(os.path.join(save_dir, 'losses.html'))
