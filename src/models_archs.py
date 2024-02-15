@@ -22,7 +22,7 @@ def save_checkpoint(model, save_dir, epoch):
 def load_checkpoint(model, save_dir, epoch):
     epoch_str = str(epoch).zfill(4)
     model_path = os.path.join(save_dir, f'model_epoch_{epoch_str}.pth')
-    return model.load(model, model_path)
+    return load(model, model_path)
 
 
 def save(model, model_path):
