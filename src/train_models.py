@@ -11,6 +11,7 @@ import json
 import h5py
 from tqdm import tqdm
 import plotly.graph_objs as go
+from plotly.subplots import make_subplots
 from skimage.transform import resize
 from sklearn.preprocessing import OneHotEncoder
 from sklearn.metrics import classification_report, roc_auc_score
@@ -197,10 +198,12 @@ def print_classification_report(report, global_metrics=None):
     df_global = df.loc[global_metrics].T[-2:-1]
     df_global.index = ['   ']
 
-    print(f'\n{df_global}\n\n{df_local}\n\n')
+    final_str = f'\n{df_global}\n\n{df_local}\n\n'
+    print(final_str)
+    return final_str
 
 
-def plot_loss_metrics(df_loss):
+def plot_loss_metrics(df_loss, title):
     """ Plot loss vs epoch with the standard desviation between kfolds
 
     Args:
@@ -210,58 +213,30 @@ def plot_loss_metrics(df_loss):
         fig (plotly.graph_objects.Figure): plotly figure.
 
     """
-    avg_loss_per_epoch = df_loss.groupby('epoch').agg({'train_loss': ['mean', 'std'],
-                                                       'test_loss': ['mean', 'std']}).reset_index()
-
-    avg_loss_per_epoch_columns = ['epoch']
-    all_tasks = ['']
-
-    for task in all_tasks:
-        for split in ['train', 'test']:
-            avg_loss_per_epoch_columns += [f'{split}_loss{task}_mean']
-            avg_loss_per_epoch_columns += [f'{split}_loss{task}_std']
-    avg_loss_per_epoch.columns = avg_loss_per_epoch_columns
-    fig = go.Figure()
-
-    colors = {'train': 'blue', 'test': 'red'}
-    colors_rgba = {'train': 'rgba(68, 68, 128, 0.2)',
-                   'test': 'rgba(128, 68, 68, 0.2)'}
-    symbols = {'': 'circle',
-               '_task': 'x',
-               '_subtask': 'star'}
-
-    for task in all_tasks:
-        for split in ['train', 'test']:
-            fig.add_trace(go.Scatter(
-                name=f'{split}{task}',
-                x=avg_loss_per_epoch['epoch'],
-                y=avg_loss_per_epoch[f'{split}_loss{task}_mean'],
-                mode='markers+lines',
-                line=dict(color=colors[split]),
-                marker=dict(color=colors[split], symbol=symbols[task])
-            ))
-            for sign in [-1, 1]:
-                if sign == -1:
-                    name = f'{split}{task} - std'
-                else:
-                    name = f'{split}{task} + std'
-                fig.add_trace(go.Scatter(
-                    name=name,
-                    x=avg_loss_per_epoch['epoch'],
-                    y=avg_loss_per_epoch[f'{split}_loss{task}_mean'] + sign * avg_loss_per_epoch[f'{split}_loss{task}_std'],
-                    mode='lines',
-                    fillcolor=colors_rgba[split],
-                    fill='tonexty',
-                    marker=dict(color=colors_rgba[split]),
-                    line=dict(width=0),
-                    showlegend=False
-                ))
-
-    fig.update_layout(
-        yaxis_title='Loss',
-        title='Train Loss per Epoch with Batch Standard Desviation',
-        hovermode="x"
-    )
+    metric_names = ['Loss', 'AUC']
+    fig = make_subplots(rows=len(metric_names),
+                        shared_xaxes=True,
+                        cols=1,
+                        subplot_titles=metric_names)
+    for plot_i, metric_name in enumerate(metric_names):
+        metric_name = metric_name.lower()
+        fig.append_trace(go.Scatter(x=df_loss['epoch'],
+                                    y=df_loss[f'train_{metric_name}'],
+                                    mode='lines+markers',
+                                    marker_color='red',
+                                    name=f'train_{metric_name}',
+                                    hovertext=df_loss['train_report']
+                                    ),
+                         row=plot_i+1, col=1)
+        fig.append_trace(go.Scatter(x=df_loss['epoch'],
+                                    y=df_loss[f'test_{metric_name}'],
+                                    mode='lines+markers',
+                                    marker_color='blue',
+                                    name=f'test_{metric_name}',
+                                    hovertext=df_loss['test_report']
+                                    ),
+                         row=plot_i+1, col=1)
+    fig.update_layout(title_text=title.capitalize(), xaxis_title="Epochs",)
     return fig
 
 
@@ -464,7 +439,9 @@ if __name__ == "__main__":
     train_metrics = {'kfold': [],
                      'epoch': [],
                      'train_loss': [],
-                     'test_loss': []}
+                     'test_loss': [],
+                     'train_auc': [],
+                     'test_auc': []}
 
     # use KFold to split patients stratified by label
     folds = list(cfg['kfold_patients'][arg_dataset].keys())
@@ -472,7 +449,7 @@ if __name__ == "__main__":
     for kfold in tqdm(folds, desc='kfold', leave=False, position=0):   
         save_dir = os.path.join(models_save_dir, modality, f'kfold_{kfold}')
         os.makedirs(save_dir, exist_ok=True)
-    
+
         # get patient_ids of each split
         training_patients = cfg['kfold_patients'][arg_dataset][kfold]['train']
         testing_patients = cfg['kfold_patients'][arg_dataset][kfold]['test']
@@ -480,10 +457,10 @@ if __name__ == "__main__":
         # filter dataframes based on the split patients
         df_train = df[df['patient_id'].isin(training_patients)]
         df_test = df[df['patient_id'].isin(testing_patients)]
-    
+
         df_train.reset_index(drop=True, inplace=True)
         df_test.reset_index(drop=True, inplace=True)
-    
+
         #  TODO: define training parameters in a .yaml file
 
         batch_size = 1  # TODO: add support for bigger batches using zero padding to create batches of the same size
@@ -505,7 +482,7 @@ if __name__ == "__main__":
 
         # Create model instance
         device = f'cuda:{torch.cuda.current_device()}'
-        
+
         model = TransformerNoduleBimodalClassifier(feature_dim,
                                                    mlp_ratio_ct, mlp_ratio_pet,
                                                    num_heads_ct, num_heads_pet,
@@ -646,8 +623,8 @@ if __name__ == "__main__":
                 test_report['epoch'] = epoch
                 test_report['split'] = 'test'
 
-                print_classification_report(train_report)
-                print_classification_report(test_report)
+                train_report_str = print_classification_report(train_report)
+                test_report_str = print_classification_report(test_report)
 
                 # save .pth model checkpoint
                 save_checkpoint(model, save_dir, epoch)
@@ -664,10 +641,15 @@ if __name__ == "__main__":
                 train_metrics['epoch'].append(epoch)
                 train_metrics['train_loss'].append(avg_train_loss)
                 train_metrics['test_loss'].append(avg_test_loss)
+                train_metrics['train_auc'].append(roc_auc_train)
+                train_metrics['test_auc'].append(roc_auc_test)
+
                 df_loss = pd.DataFrame(train_metrics)
                 df_loss = df_loss[df_loss['kfold'] == kfold]
+                df_loss['train_report'] = train_report_str.replace('\n', '<br>').replace(' ', '  ')
+                df_loss['test_report'] = test_report_str.replace('\n', '<br>').replace(' ', '  ')
 
-                fig = plot_loss_metrics(df_loss)
+                fig = plot_loss_metrics(df_loss, title=f'{arg_dataset} fold {kfold}')
                 fig.write_html(os.path.join(save_dir, 'losses.html'))
 
                 # early stoping
