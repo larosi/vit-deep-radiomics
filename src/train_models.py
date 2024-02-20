@@ -655,10 +655,11 @@ if __name__ == "__main__":
                 fig.write_html(os.path.join(save_dir, 'losses.html'))
 
                 # early stoping
-                patience = 25
-                df_loss['is_improvement'] = df_loss['test_loss'] <= df_loss['test_loss'].cummin()
-                df_loss['epochs_since_improvement'] = (~df_loss['is_improvement']).cumsum()
+                patience = 10
+                df_loss['target_metric'] = df_loss['test_auc'] * np.sqrt(df_loss['test_auc'] * df_loss['train_auc'])
+                df_loss['is_improvement'] = df_loss['target_metric'] >= df_loss['target_metric'].max()
+                epochs_since_improvement = epoch - df_loss.iloc[df_loss['is_improvement'].argmax()]['epoch']
 
-                if df_loss['epochs_since_improvement'].iloc[-1] >= patience:
+                if epochs_since_improvement >= patience:
                     print(f"Early stopping triggered after {epoch + 1} epochs")
                     break
