@@ -345,7 +345,7 @@ def find_divisor(slice_count, modality):
 
 def prepare_df(df):
     df['divisor'] = 1
-    slices_per_patient = df.groupby(['patient_id', 'modality'])['slice', 'divisor'].max()
+    slices_per_patient = df.groupby(['patient_id', 'modality'])[['slice', 'divisor']].max()
     slices_per_patient.describe()
 
     slices_per_patient['divisor'] = slices_per_patient.apply(lambda x: find_divisor(x['slice'], modality=x.name[1]), axis=1)
