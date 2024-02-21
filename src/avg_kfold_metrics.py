@@ -6,12 +6,20 @@ Created on Sun Jan 14 15:49:59 2024
 """
 
 import os
+import numpy as np
 import pandas as pd
 import json
 import plotly.express as px
 import warnings
 warnings.simplefilter(action='ignore')
 
+def harmonic_mean(metric_a, metric_b):
+    harmonic = (2* metric_a * metric_b) / (metric_a + metric_b)
+    return harmonic
+
+def geometric_mean(metric_a, metric_b, metric_c):
+    harmonic =  np.cbrt(metric_a * metric_b, metric_c)
+    return harmonic
 
 def load_json(json_path: str):
     """ Load a json file from path """
@@ -22,11 +30,6 @@ def load_json(json_path: str):
 
 if __name__ == "__main__":
     kfold = 4
-    experiments = ['medsam_transformer_stanford',
-                   'medsam_transformer_santa_maria',
-                   'medsam_conv_santa_maria',
-                   'medsam_conv_stanford']
-    modalites = ['pet', 'ct']
     folder = 'petct'
 
     metrics_sumary = {}
@@ -40,11 +43,16 @@ if __name__ == "__main__":
     metrics_sumary['Precision'] = []
     metrics_sumary['Recall'] = []
 
+    metrics_sumary['Specificity'] = []
+    metrics_sumary['Sensivity'] = []
+
     metrics_sumary['Best Kfold'] = []
     metrics_sumary['Best Epoch'] = []
+    experiments = os.listdir(os.path.join('..', 'models', folder))
 
-    for modality in modalites:
-        for experiment in experiments:
+    for experiment in experiments:
+        modalities = os.listdir(os.path.join('..', 'models', folder, experiment))
+        for modality in modalities:
             json_metrics = []
             for k in range(0, kfold+1):
                 kfold_dir = os.path.join('..', 'models', folder, experiment, modality, f'kfold_{k}')
@@ -83,8 +91,12 @@ if __name__ == "__main__":
             # select the best model of each kfold based on a target metric
             df_best = df_metrics.copy()
             df_best = df_best[df_best['index'] == 'f1-score']
-            df_best = df_best[df_best['split'] == 'test']
-            df_best['target_metric'] = df_best['ROC AUC']
+            df_train = df_best[df_best['split'] == 'train']
+            df_test = df_best[df_best['split'] == 'test']
+            df_best = df_test
+            df_best['target_metric'] = geometric_mean(df_test['ROC AUC'] * harmonic_mean(df_test['ROC AUC'], df_train['ROC AUC']),
+                                                      df_test['1'] * harmonic_mean(df_test['1'], df_train['1']),
+                                                      df_test['0'] * harmonic_mean(df_test['0'], df_train['0']))
             df_best = df_best.sort_values('target_metric', ascending=False)
             df_best_kfolds = df_best.groupby('kfold').first()
 
@@ -94,24 +106,43 @@ if __name__ == "__main__":
             for best_k, row in df_best_kfolds.iterrows():
                 best_epoch = row['epoch']
                 best_metrics.append(df_metrics_group.loc[(best_k, best_epoch)])
+                best_metrics[-1]['target_metric'] = row['target_metric']
 
             best_metrics = pd.concat(best_metrics, axis=0)
             #best_metrics.round(3).to_csv('best_metrics.csv')
+            print(best_metrics.round(3))
 
             # mean across all kfolds of the best models
             model_avg_metrics = best_metrics.groupby(['split', 'index']).mean()
             model_std_metrics = best_metrics.groupby(['split', 'index']).std()   # TODO: show the std of each metric
+
+            combined_metrics = model_avg_metrics.copy()
+            for column in combined_metrics.columns:
+                avg = model_avg_metrics[column]
+                std = model_std_metrics[column]
+                combined_metrics[column] = avg.map('{:,.3f}'.format) + " ± " + std.map('{:,.3f}'.format)
             #model_avg_metrics.T.round(3).to_csv('model_avg_metrics.csv')
 
-            best_k, best_epoch = best_metrics.iloc[best_metrics['ROC AUC'].argmax()].name
-
+            if df_best_kfolds.shape[0] > 1:
+                best_k = best_metrics.groupby(level=[0,1]).mean()['target_metric'].argmax()
+                best_epoch = best_metrics.loc[best_k].index[0]
+            else:
+                best_k, best_epoch = best_metrics.iloc[best_metrics['target_metric'].argmax()].name
             # Store the kfold avg metrics of each 'Dataset', 'Model', 'Modality', 'Split'
             for split in ['train', 'test']:
+                
+                auc = combined_metrics.loc[split, 'recall']['ROC AUC']
+                accuracy = combined_metrics.loc[split, 'recall']['accuracy']
+                recall_neg = combined_metrics.loc[split, 'recall']['0']
+                precision = combined_metrics.loc[split, 'precision']['1']
+                recall = combined_metrics.loc[split, 'recall']['1']
+                """              
                 auc = model_avg_metrics.loc[split, 'recall']['ROC AUC']
                 accuracy = model_avg_metrics.loc[split, 'recall']['accuracy']
+                recall_neg = model_avg_metrics.loc[split, 'recall']['0']
                 precision = model_avg_metrics.loc[split, 'precision']['1']
                 recall = model_avg_metrics.loc[split, 'recall']['1']
-
+                """
                 model_name = ' '.join(experiment.split('_')[0:2])
                 dataset = ' '.join(experiment.split('_')[2:])
 
@@ -125,6 +156,9 @@ if __name__ == "__main__":
                 metrics_sumary['Precision'].append(precision)
                 metrics_sumary['Recall'].append(recall)
 
+                metrics_sumary['Specificity'].append(recall)
+                metrics_sumary['Sensivity'].append(recall_neg)
+
                 metrics_sumary['Best Kfold'].append(best_k)
                 metrics_sumary['Best Epoch'].append(best_epoch)
 
@@ -135,4 +169,5 @@ if __name__ == "__main__":
     sumary_index = ['Dataset', 'Model', 'Modality', 'Split']
     df_metrics_sumary = df_metrics_sumary.set_index(sumary_index).sort_index()
     df_metrics_sumary = df_metrics_sumary.sort_index(level=[0, 1, 2, 3], ascending=[True, True, True, False])
-    df_metrics_sumary.round(3).to_csv(os.path.join('..', 'metrics', f'{folder}_metrics_sumary.csv'))
+    df_metrics_sumary.round(3).to_csv(os.path.join('..', 'metrics', f'{folder}_metrics_sumary.csv'), encoding='utf-8-sig')
+    print(df_metrics_sumary.round(3).T)
