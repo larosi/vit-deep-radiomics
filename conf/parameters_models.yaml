@@ -1,12 +1,12 @@
 models:
   transformer:
-    learning_rate: 0.0001
+    learning_rate: 0.0005
     feature_dim: 256
     ct:
       num_layers: 2
-      num_heads: 8
+      num_heads: 4
       mlp_ratio: 4
     pet:
-      num_layers: 1
+      num_layers: 2
       num_heads: 4
       mlp_ratio: 4
