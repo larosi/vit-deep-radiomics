@@ -20,7 +20,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader, WeightedRandomSampler
-from skimage.morphology import thin
 
 from models_archs import save_checkpoint, TransformerNoduleBimodalClassifier
 from config_manager import load_conf
@@ -32,12 +31,16 @@ def positional_encoding_3d(x, y, z, D, scale=10000):
     encoding = np.zeros((n_points, D))
 
     for i in range(D // 6):
-        encoding[:, 2*i] = np.sin(x / (scale ** (6 * i / D)))
-        encoding[:, 2*i + 1] = np.cos(x / (scale ** (6 * i / D)))
-        encoding[:, 2*i + D // 3] = np.sin(y / (scale ** (6 * i / D)))
-        encoding[:, 2*i + 1 + D // 3] = np.cos(y / (scale ** (6 * i / D)))
-        encoding[:, 2*i + 2 * D // 3] = np.sin(z / (scale ** (6 * i / D)))
-        encoding[:, 2*i + 1 + 2 * D // 3] = np.cos(z / (scale ** (6 * i / D)))
+        exponent = scale ** (6 * i / D)
+        x_ = x / exponent
+        y_ = y / exponent
+        z_ = z / exponent
+        encoding[:, 2*i] = np.sin(x / exponent)
+        encoding[:, 2*i + 1] = np.cos(x / exponent)
+        encoding[:, 2*i + D // 3] = np.sin(y / exponent)
+        encoding[:, 2*i + 1 + D // 3] = np.cos(y / exponent)
+        encoding[:, 2*i + 2 * D // 3] = np.sin(z / exponent)
+        encoding[:, 2*i + 1 + 2 * D // 3] = np.cos(z / exponent)
 
     return encoding
 
@@ -48,8 +51,19 @@ class PETCTDataset3D(Dataset):
         self.df_ct = dataframe[dataframe['modality'] == 'ct'].reset_index(drop=True)
         self.df_pet = dataframe[dataframe['modality'] == 'pet'].reset_index(drop=True)
 
-        self.dataframe = self.df_ct.groupby(['patient_id_new'])[['modality', 'dataset', 'label', 'patient_id']].first()
-        self.dataframe.reset_index(inplace=True, drop=False)
+        if use_augmentation:
+            n_samples = len(self.df_ct['patient_id_new'].unique())
+            self.dataframe = self.df_ct.copy()
+            self.dataframe['patient_id_new_int'] = self.dataframe['patient_id_new'].str.split(':').str[-1]
+            self.dataframe['patient_id_new_int'] = self.dataframe['patient_id_new_int'].astype(int)
+            self.dataframe.sort_values(by='patient_id_new_int', inplace=True, ascending=False)
+            self.dataframe = self.dataframe.groupby(['patient_id'])[['modality', 'dataset', 'label', 'patient_id_new', 'patient_id_new_int']].first()
+            self.dataframe.reset_index(inplace=True, drop=False)
+            repeat_times = int(np.ceil(n_samples / self.dataframe.shape[0]))
+            self.dataframe = pd.DataFrame(np.repeat(self.dataframe.values, repeat_times, axis=0), columns=self.dataframe.columns)
+        else:
+            self.dataframe = self.df_ct.groupby(['patient_id_new'])[['modality', 'dataset', 'label', 'patient_id']].first()
+            self.dataframe.reset_index(inplace=True, drop=False)
 
         self.use_augmentation = use_augmentation
 
@@ -70,14 +84,19 @@ class PETCTDataset3D(Dataset):
         return len(self.dataframe)
 
     def __getitem__(self, idx):
+        enable_random_crop = False
+        noise_val = 10
         sample = self.dataframe.iloc[idx]
         patient_id_rew = sample.patient_id_new
         patient_id = sample.patient_id
         label = sample.label
-        noise = np.random.random(3) * 5 - 2.5
+        noise = np.random.random(3) * noise_val - noise_val/2
         if self.use_augmentation:
             [[flip, angle]] = self.flip_angles.sample(n=1).values
-            
+            patient_int = sample.patient_id_new_int
+            if patient_int > 0:
+                patient_int = np.random.randint(0, patient_int)
+            patient_id_rew = f'{patient_id}:{patient_int}'
         else:
             flip = 'None'
             angle = 0
@@ -85,18 +104,16 @@ class PETCTDataset3D(Dataset):
 
         ct_slices = self.df_ct.loc[(patient_id_rew, angle, flip)]['slice'].values
         start_slice_index, end_slice_index = ct_slices.argmin(), ct_slices.argmax()
-        
-        if self.use_augmentation: # random slice crop
-            if len(ct_slices) > 7:
-                window_size = np.random.randint(int(len(ct_slices)*0.5), len(ct_slices))
-                start_slice_index = np.random.randint(0, len(ct_slices)-window_size)
-                end_slice_index = start_slice_index + window_size
+        if enable_random_crop:  # TODO: move to cfg file
+            if self.use_augmentation: # random slice crop
+                if len(ct_slices) > 7:
+                    window_size = np.random.randint(int(len(ct_slices)*0.6), len(ct_slices))
+                    start_slice_index = np.random.randint(0, len(ct_slices)-window_size)
+                    end_slice_index = start_slice_index + window_size
 
         feature_ids = self.df_ct.loc[(patient_id_rew, angle, flip)]['feature_id'].values[start_slice_index:end_slice_index]
         spatial_res = self.df_ct.loc[(patient_id_rew, angle, flip)]['spatial_res'].values[0]
         spatial_res = np.abs(spatial_res)
-        if spatial_res.min() <= 0:
-            spatial_res = np.repeat(spatial_res.max(), spatial_res.shape)
         features_ct = self._get_features(self.hdf5_ct_path, patient_id, feature_ids, angle, flip, noise, spatial_res)
         features_ct = torch.as_tensor(features_ct, dtype=torch.float32)
 
@@ -110,8 +127,6 @@ class PETCTDataset3D(Dataset):
         df_pet = self.df_pet.loc[(patient_id, angle, flip)]
         spatial_res = df_pet['spatial_res'].values[0]
         spatial_res = np.abs(spatial_res)
-        if spatial_res.min() <= 0:
-            spatial_res = np.repeat(spatial_res.max(), spatial_res.shape)
         feature_ids = df_pet[np.logical_and(df_pet['slice'] >= start_slice, df_pet['slice'] <= end_slice)]['feature_id'].values
         features_pet = self._get_features(self.hdf5_pet_path, patient_id, feature_ids, angle, flip, noise, spatial_res)
         features_pet = torch.as_tensor(features_pet, dtype=torch.float32)
@@ -126,19 +141,15 @@ class PETCTDataset3D(Dataset):
     def _get_features(self, hdf5_path, patient_id, feature_ids, angle, flip, noise, spatial_res):
         features = []
         masks = []
-        
+
         with h5py.File(hdf5_path, 'r') as h5f:
             for feature_id in feature_ids:
                 slice_features = h5f[f'{patient_id}/features/{feature_id}'][()]
                 slice_mask_orig = h5f[f'{patient_id}/masks/{feature_id}'][()]
-                slice_mask = resize(slice_mask_orig, slice_features.shape[0:2])
-                if np.prod(noise) != 0:
-                    max_num_iter = np.random.randint(0, 1)
-                    if max_num_iter > 0:
-                        slice_mask = thin(slice_mask, max_num_iter=max_num_iter)
+                slice_mask = resize(slice_mask_orig, slice_features.shape[0:2], order=0)
                 slice_mask = np.expand_dims(slice_mask, axis=-1)
                 if self.arch == 'conv':
-                    features.append(slice_features*slice_mask)  # elementwise prod feature-mask
+                    features.append(slice_features * slice_mask)  # elementwise prod feature-mask
                 else:
                     features.append(slice_features) 
                 masks.append(slice_mask)
@@ -147,26 +158,27 @@ class PETCTDataset3D(Dataset):
         if self.arch == 'transformer':
             masks = np.transpose(np.stack(masks, axis=0), axes=(1, 2, 0, 3))  # (slice, h, w, 1) -> (h, w, slice, 1)
             h_orig, w_orig = slice_mask_orig.shape[0:2]
-            features = np.transpose(np.stack(features, axis=0), axes=(2, 3, 1, 0))  # (h, w, slice, feat_dim)
+            features = np.transpose(features, axes=(2, 3, 1, 0))  # (h, w, slice, feat_dim)
             h_new, w_new = features.shape[0], features.shape[1]
 
             x, y, z = np.meshgrid(np.arange(0, features.shape[0]),
                                   np.arange(0, features.shape[1]),
                                   np.arange(0, features.shape[2]))
-            x = (x.flatten()/w_new).flatten() * w_orig * spatial_res[0]
-            y = (y.flatten()/h_new).flatten() * h_orig * spatial_res[1]
+            x = (x.flatten() / w_new).flatten() * w_orig * spatial_res[0]
+            y = (y.flatten() / h_new).flatten() * h_orig * spatial_res[1]
             z = (z.flatten()).flatten() * spatial_res[2]
 
-            x = (x - x.mean() + noise[0])
-            y = (y - y.mean() + noise[1])
-            z = (z - z.mean() + noise[2])
+            masks = masks.flatten()
+            x = (x - x.mean() + noise[0])[masks]
+            y = (y - y.mean() + noise[1])[masks]
+            z = (z - z.mean() + noise[2])[masks]
 
             pe = positional_encoding_3d(x, y, z, D=self.feature_dim, scale=10000)
 
-            features = features.reshape(-1, self.feature_dim) + pe/4 # (seq_len, feat_dim)
-            features = features[masks.flatten(), :]  # (seq_len, feat_dim)
+            features = features.reshape(-1, self.feature_dim)[masks, :] + pe / 4  # (seq_len, feat_dim)
 
         return features
+
 
 def print_classification_report(report, global_metrics=None):
     """ Display a sklearn like classification_report with extra metrics
@@ -303,6 +315,55 @@ def get_sampler_weights(train_labels):
     weights = [1/weight_for_0 if lb == 0 else 1/weight_for_1 for lb in train_labels]
     return weights
 
+
+class CrossModalFocalLoss(nn.Module):
+    """
+     Multi-class Cross Modal Focal Loss
+    """
+    def __init__(self, gamma=2, alpha=None, beta=0.5):
+        super(CrossModalFocalLoss, self).__init__()
+        self.gamma = gamma
+        self.alpha = alpha
+        self.beta = beta
+        self.eps = 1e-8
+
+    def forward(self, inputs_petct, inputs_ct, inputs_pet, targets):
+        """
+        inputs_petct: [N, C], float32
+        inputs_ct: [N, C], float32
+        inputs_pet: [N, C], float32
+        target: [N, ], int64
+        """
+        if len(inputs_petct.shape) == 1:
+            inputs_petct = torch.unsqueeze(inputs_petct, 0)
+            inputs_ct = torch.unsqueeze(inputs_ct, 0)
+            inputs_pet = torch.unsqueeze(inputs_pet, 0)
+            targets = torch.unsqueeze(targets, 0)
+        class_indices = torch.argmax(targets, dim=1)
+
+        logpt_petct = F.log_softmax(inputs_petct, dim=1)
+        logpt_ct = F.log_softmax(inputs_ct, dim=1)
+        logpt_pet = F.log_softmax(inputs_pet, dim=1)
+
+        pt_petct = torch.exp(logpt_petct)
+        logpt_petct = (1-pt_petct)**self.gamma * logpt_petct
+        loss_petct = F.nll_loss(logpt_petct, class_indices, self.alpha, reduction='mean')
+
+        pt_ct = torch.exp(logpt_ct)
+        pt_pet = torch.exp(logpt_pet)
+
+        pt_mean = (2*pt_ct*pt_pet) / (pt_ct + pt_pet + self.eps)
+
+        logpt_ct = (1-pt_mean*pt_ct)**self.gamma * logpt_ct
+        loss_ct = F.nll_loss(logpt_ct, class_indices, self.alpha, reduction='mean')
+
+        logpt_pet = (1-pt_mean*pt_pet)**self.gamma * logpt_pet
+        loss_pet = F.nll_loss(logpt_pet, class_indices, self.alpha, reduction='mean')
+
+        loss = (self.beta*loss_petct + (1-self.beta)*(loss_ct + loss_pet))
+        return loss
+
+
 class FocalLoss(nn.Module):
     """
      Multi-class Focal Loss
@@ -329,18 +390,13 @@ class FocalLoss(nn.Module):
         loss = F.nll_loss(logpt, class_indices, self.weight, reduction='sum')
         return loss
 
+
 def find_divisor(slice_count, modality):
     if modality == 'ct':
-        desired_slices = 7
+        desired_slices = 15
     else:
         desired_slices = 2
-    if slice_count < desired_slices:
-        return 1
-    else:
-        for divisor in range(desired_slices, slice_count + 1):
-            if slice_count % divisor == 0 or slice_count % divisor >= desired_slices:
-                return divisor
-        return 1
+    return np.clip(desired_slices, 1, slice_count)
 
 
 def prepare_df(df):
@@ -467,8 +523,8 @@ if __name__ == "__main__":
 
         batch_size = 1  # TODO: add support for bigger batches using zero padding to create batches of the same size
         start_epoch = 0
-        num_epochs = 25
-        
+        num_epochs = 50
+
         cfg_model = cfg['models'][arch]
         learning_rate = cfg_model['learning_rate']
         feature_dim = cfg_model['feature_dim']
@@ -498,7 +554,10 @@ if __name__ == "__main__":
         # CrossEntropyLoss because the last layer has one output per class (mutant, wildtype)
 
         #criterion = nn.CrossEntropyLoss()
-        criterion = FocalLoss(alpha=torch.tensor([0.25, 0.75]).to(device), gamma=2.0)
+        #criterion = FocalLoss(alpha=torch.tensor([0.25, 0.75]).to(device), gamma=2.0)
+        #criterion = CrossModalFocalLoss(alpha=torch.tensor([0.25, 0.75]).to(device), gamma=2.5, beta=0.6)
+        criterion = CrossModalFocalLoss(alpha=torch.tensor([0.25, 0.75]).to(device), gamma=2.5, beta=0.6)
+
         optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=0.01, amsgrad=False)
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs, eta_min=0.0001)
 
@@ -557,7 +616,13 @@ if __name__ == "__main__":
 
                     outputs = model(ct_batch, pet_batch)
 
-                    loss = criterion(torch.squeeze(outputs[0]), labels_batch) / iters_to_accumulate
+                    #loss = criterion(torch.squeeze(outputs[0]), labels_batch) / iters_to_accumulate
+
+                    loss = criterion(torch.squeeze(outputs[0]), 
+                                     torch.squeeze(outputs[2]),
+                                     torch.squeeze(outputs[3]),
+                                     labels_batch) / iters_to_accumulate
+
                     y_true, y_score = get_y_true_and_pred(y_true=labels_batch, y_pred=outputs[0], cpu=True)
 
                     y_true_train.append(y_true)
@@ -581,7 +646,12 @@ if __name__ == "__main__":
 
                         outputs = model(ct_batch, pet_batch)
 
-                        loss = criterion(torch.squeeze(outputs[0]), labels_batch)
+                        #loss = criterion(torch.squeeze(outputs[0]), labels_batch)
+                        loss = criterion(torch.squeeze(outputs[0]),
+                                         torch.squeeze(outputs[2]),
+                                         torch.squeeze(outputs[3]),
+                                         labels_batch)
+
                         y_true, y_score = get_y_true_and_pred(y_true=labels_batch, y_pred=outputs[0], cpu=True)
 
                         y_true_test.append(y_true)
@@ -600,12 +670,12 @@ if __name__ == "__main__":
                 y_true_train = np.concatenate(y_true_train, axis=0)
                 y_score_train = np.concatenate(y_score_train, axis=0)
                 y_score_train = y_score_train[:, 1]
-                y_pred_train = (y_score_train > 0.5)*1
+                y_pred_train = (y_score_train >= 0.5)*1
 
                 y_true_test = np.concatenate(y_true_test, axis=0)
                 y_score_test = np.concatenate(y_score_test, axis=0)
                 y_score_test = y_score_test[:, 1]
-                y_pred_test = (y_score_test > 0.5)*1
+                y_pred_test = (y_score_test >= 0.5)*1
 
                 # create a clasification report of each split
                 roc_auc_test = roc_auc_score(y_true_test, y_score_test)
@@ -627,9 +697,6 @@ if __name__ == "__main__":
 
                 train_report_str = print_classification_report(train_report)
                 test_report_str = print_classification_report(test_report)
-
-                # save .pth model checkpoint
-                save_checkpoint(model, save_dir, epoch)
 
                 # save train and test clasification reports into a json file
                 with open(os.path.join(save_dir, f'train_metrics_{epoch}.json'), 'w') as file:
@@ -656,6 +723,15 @@ if __name__ == "__main__":
 
                 # early stoping
                 patience = 10
+
+                df_loss['target_metric'] = df_loss['test_auc'] * np.sqrt(df_loss['test_auc'] * df_loss['train_auc'])
+                df_loss['is_improvement'] = df_loss['target_metric'] >= df_loss['target_metric'].max()
+                epochs_since_improvement = epoch - df_loss.iloc[df_loss['is_improvement'].argmax()]['epoch']
+
+                # save .pth model checkpoint
+                if epochs_since_improvement == 0:
+                    save_checkpoint(model, save_dir, epoch)
+
                 df_loss['target_metric'] = df_loss['test_auc'] * np.sqrt(df_loss['test_auc'] * df_loss['train_auc'])
                 df_loss['is_improvement'] = df_loss['target_metric'] >= df_loss['target_metric'].max()
                 epochs_since_improvement = epoch - df_loss.iloc[df_loss['is_improvement'].argmax()]['epoch']
