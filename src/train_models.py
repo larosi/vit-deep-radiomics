@@ -56,7 +56,7 @@ class PETCTDataset3D(Dataset):
             self.dataframe.sort_values(by='patient_id_new_int', inplace=True, ascending=False)
             self.dataframe = self.dataframe.groupby(['patient_id'])[['modality', 'dataset', 'label', 'patient_id_new', 'patient_id_new_int']].first()
             self.dataframe.reset_index(inplace=True, drop=False)
-            repeat_times = int(np.ceil(n_samples / self.dataframe.shape[0]))
+            repeat_times = max(5, int(np.ceil(n_samples / self.dataframe.shape[0])))
             self.dataframe = pd.DataFrame(np.repeat(self.dataframe.values, repeat_times, axis=0), columns=self.dataframe.columns)
         else:
             self.dataframe = self.df_ct.groupby(['patient_id_new'])[['modality', 'dataset', 'label', 'patient_id']].first()
@@ -81,13 +81,14 @@ class PETCTDataset3D(Dataset):
         return len(self.dataframe)
 
     def __getitem__(self, idx):
-        enable_random_crop = False
+        enable_random_crop = True
         noise_val = 10
         sample = self.dataframe.iloc[idx]
         patient_id_rew = sample.patient_id_new
         patient_id = sample.patient_id
         label = sample.label
         noise = np.random.random(3) * noise_val - noise_val/2
+        scale_noise = np.random.uniform(0.85, 1.15)
         if self.use_augmentation:
             [[flip, angle]] = self.flip_angles.sample(n=1).values
             patient_int = sample.patient_id_new_int
@@ -98,19 +99,20 @@ class PETCTDataset3D(Dataset):
             flip = 'None'
             angle = 0
             noise = noise * 0
+            scale_noise = 1.0
 
         ct_slices = self.df_ct.loc[(patient_id_rew, angle, flip)]['slice'].values
         start_slice_index, end_slice_index = ct_slices.argmin(), ct_slices.argmax()
         if enable_random_crop:  # TODO: move to cfg file
             if self.use_augmentation: # random slice crop
                 if len(ct_slices) > 7:
-                    window_size = np.random.randint(int(len(ct_slices)*0.6), len(ct_slices))
+                    window_size = np.random.randint(7, len(ct_slices))
                     start_slice_index = np.random.randint(0, len(ct_slices)-window_size)
                     end_slice_index = start_slice_index + window_size
 
         feature_ids = self.df_ct.loc[(patient_id_rew, angle, flip)]['feature_id'].values[start_slice_index:end_slice_index]
         spatial_res = self.df_ct.loc[(patient_id_rew, angle, flip)]['spatial_res'].values[0]
-        spatial_res = np.abs(spatial_res)
+        spatial_res = np.abs(spatial_res) * scale_noise
         features_ct = self._get_features(self.hdf5_ct_path, patient_id, feature_ids, angle, flip, noise, spatial_res)
         features_ct = torch.as_tensor(features_ct, dtype=torch.float32)
 
@@ -123,7 +125,7 @@ class PETCTDataset3D(Dataset):
 
         df_pet = self.df_pet.loc[(patient_id, angle, flip)]
         spatial_res = df_pet['spatial_res'].values[0]
-        spatial_res = np.abs(spatial_res)
+        spatial_res = np.abs(spatial_res) * scale_noise
         feature_ids = df_pet[np.logical_and(df_pet['slice'] >= start_slice, df_pet['slice'] <= end_slice)]['feature_id'].values
         features_pet = self._get_features(self.hdf5_pet_path, patient_id, feature_ids, angle, flip, noise, spatial_res)
         features_pet = torch.as_tensor(features_pet, dtype=torch.float32)
@@ -222,29 +224,40 @@ def plot_loss_metrics(df_loss, title):
         fig (plotly.graph_objects.Figure): plotly figure.
 
     """
-    metric_names = ['Loss', 'AUC']
-    fig = make_subplots(rows=len(metric_names),
+    metric_names = ['Loss', 'AUC', 'F1', 'Target_metric']
+    plot_grid = [[1, 1], [1, 2], [2, 1], [2, 2]]
+    fig = make_subplots(rows=2,
                         shared_xaxes=True,
-                        cols=1,
+                        cols=2,
                         subplot_titles=metric_names)
     for plot_i, metric_name in enumerate(metric_names):
         metric_name = metric_name.lower()
-        fig.append_trace(go.Scatter(x=df_loss['epoch'],
-                                    y=df_loss[f'train_{metric_name}'],
-                                    mode='lines+markers',
-                                    marker_color='red',
-                                    name=f'train_{metric_name}',
-                                    hovertext=df_loss['train_report']
-                                    ),
-                         row=plot_i+1, col=1)
-        fig.append_trace(go.Scatter(x=df_loss['epoch'],
-                                    y=df_loss[f'test_{metric_name}'],
-                                    mode='lines+markers',
-                                    marker_color='blue',
-                                    name=f'test_{metric_name}',
-                                    hovertext=df_loss['test_report']
-                                    ),
-                         row=plot_i+1, col=1)
+        if f'train_{metric_name}' in df_loss.columns:
+            fig.append_trace(go.Scatter(x=df_loss['epoch'],
+                                        y=df_loss[f'train_{metric_name}'],
+                                        mode='lines+markers',
+                                        marker_color='red',
+                                        name=f'train_{metric_name}',
+                                        hovertext=df_loss['train_report']
+                                        ),
+                             row=plot_grid[plot_i][0], col=plot_grid[plot_i][1])
+            fig.append_trace(go.Scatter(x=df_loss['epoch'],
+                                        y=df_loss[f'test_{metric_name}'],
+                                        mode='lines+markers',
+                                        marker_color='blue',
+                                        name=f'test_{metric_name}',
+                                        hovertext=df_loss['test_report']
+                                        ),
+                             row=plot_grid[plot_i][0], col=plot_grid[plot_i][1])
+        else:
+            fig.append_trace(go.Scatter(x=df_loss['epoch'],
+                                        y=df_loss[f'{metric_name}'],
+                                        mode='lines+markers',
+                                        marker_color='green',
+                                        name=f'{metric_name}',
+                                        hovertext=df_loss['is_improvement']),
+                             
+                             row=plot_grid[plot_i][0], col=plot_grid[plot_i][1])
     fig.update_layout(title_text=title.capitalize(), xaxis_title="Epochs",)
     return fig
 
@@ -495,12 +508,13 @@ if __name__ == "__main__":
                      'test_loss': [],
                      'train_auc': [],
                      'test_auc': [],
+                     'train_f1': [],
+                     'test_f1': [],
                      'train_report': [],
                      'test_report': []}
 
     # use KFold to split patients stratified by label
     folds = list(cfg['kfold_patients'][arg_dataset].keys())
-
     for kfold in tqdm(folds, desc='kfold', leave=False, position=0):   
         save_dir = os.path.join(models_save_dir, modality, f'kfold_{kfold}')
         os.makedirs(save_dir, exist_ok=True)
@@ -709,24 +723,27 @@ if __name__ == "__main__":
                 train_metrics['test_loss'].append(avg_test_loss)
                 train_metrics['train_auc'].append(roc_auc_train)
                 train_metrics['test_auc'].append(roc_auc_test)
+                train_metrics['train_f1'].append(train_report['macro avg']['f1-score'])
+                train_metrics['test_f1'].append(test_report['macro avg']['f1-score'])
                 train_metrics['train_report'].append(train_report_str.replace('\n', '<br>').replace(' ', '  '))
                 train_metrics['test_report'].append(test_report_str.replace('\n', '<br>').replace(' ', '  '))
 
                 df_loss = pd.DataFrame(train_metrics)
                 df_loss = df_loss[df_loss['kfold'] == kfold]
 
+                # early stoping
+                patience = 15
+
+                df_loss['target_metric'] = df_loss['test_auc'] * np.sqrt(df_loss['test_auc'] * df_loss['train_auc']) * np.sqrt(df_loss['test_f1'] * df_loss['train_f1'])
+                df_loss['is_improvement'] = df_loss['target_metric'] >= df_loss['target_metric'].max()
+
                 fig = plot_loss_metrics(df_loss, title=f'{arg_dataset} fold {kfold}')
                 fig.write_html(os.path.join(save_dir, 'losses.html'))
 
-                # early stoping
-                patience = 10
-
-                df_loss['target_metric'] = df_loss['test_auc'] * np.sqrt(df_loss['test_auc'] * df_loss['train_auc'])
-                df_loss['is_improvement'] = df_loss['target_metric'] >= df_loss['target_metric'].max()
                 epochs_since_improvement = epoch - df_loss.iloc[df_loss['is_improvement'].argmax()]['epoch']
 
                 # save .pth model checkpoint
-                if epochs_since_improvement == 0:
+                if df_loss['target_metric'].iloc[-1] >= df_loss['target_metric'].mean():
                     save_checkpoint(model, save_dir, epoch)
 
                 df_loss['target_metric'] = df_loss['test_auc'] * np.sqrt(df_loss['test_auc'] * df_loss['train_auc'])
