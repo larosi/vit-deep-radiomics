@@ -32,9 +32,6 @@ def positional_encoding_3d(x, y, z, D, scale=10000):
 
     for i in range(D // 6):
         exponent = scale ** (6 * i / D)
-        x_ = x / exponent
-        y_ = y / exponent
-        z_ = z / exponent
         encoding[:, 2*i] = np.sin(x / exponent)
         encoding[:, 2*i + 1] = np.cos(x / exponent)
         encoding[:, 2*i + D // 3] = np.sin(y / exponent)
@@ -196,10 +193,10 @@ def print_classification_report(report, global_metrics=None):
     headers = df.index.to_list()
 
     df = df.T.astype(str)
-    support = df.loc['macro avg'][-1]
+    support = df.loc['macro avg'].iloc[-1]
 
     for row in global_metrics:
-        metric_val = df.loc[row][-2]
+        metric_val = df.loc[row].iloc[-2]
         new_row = [' ']*len(headers)
         new_row[-2] = metric_val
         new_row[-1] = support
