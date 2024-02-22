@@ -740,6 +740,8 @@ if __name__ == "__main__":
                 fig = plot_loss_metrics(df_loss, title=f'{arg_dataset} fold {kfold}')
                 fig.write_html(os.path.join(save_dir, 'losses.html'))
 
+                df_loss.sort_values(by='epoch', ascending=True, inplace=True)
+                df_loss.reset_index(inplace=True, drop=True)
                 epochs_since_improvement = epoch - df_loss.iloc[df_loss['is_improvement'].argmax()]['epoch']
 
                 # save .pth model checkpoint
