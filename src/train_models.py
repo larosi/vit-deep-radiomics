@@ -56,7 +56,7 @@ class PETCTDataset3D(Dataset):
             self.dataframe.sort_values(by='patient_id_new_int', inplace=True, ascending=False)
             self.dataframe = self.dataframe.groupby(['patient_id'])[['modality', 'dataset', 'label', 'patient_id_new', 'patient_id_new_int']].first()
             self.dataframe.reset_index(inplace=True, drop=False)
-            repeat_times = min(max(3, int(np.ceil(n_samples / self.dataframe.shape[0]))), 1)
+            repeat_times = np.clip(np.ceil(n_samples / self.dataframe.shape[0]), 3, 10)
             self.dataframe = pd.DataFrame(np.repeat(self.dataframe.values, repeat_times, axis=0), columns=self.dataframe.columns)
         else:
             self.dataframe = self.df_ct.groupby(['patient_id_new'])[['modality', 'dataset', 'label', 'patient_id']].first()
@@ -403,7 +403,7 @@ class FocalLoss(nn.Module):
 
 def find_divisor(slice_count, modality):
     if modality == 'ct':
-        desired_slices = 15
+        desired_slices = 25
     else:
         desired_slices = 2
     return np.clip(desired_slices, 1, slice_count)
@@ -567,10 +567,10 @@ if __name__ == "__main__":
         #criterion = nn.CrossEntropyLoss()
         #criterion = FocalLoss(alpha=torch.tensor([0.25, 0.75]).to(device), gamma=2.0)
         #criterion = CrossModalFocalLoss(alpha=torch.tensor([0.25, 0.75]).to(device), gamma=2.5, beta=0.6)
-        criterion = CrossModalFocalLoss(alpha=torch.tensor([0.25, 0.75]).to(device), gamma=2.5, beta=0.6)
+        criterion = CrossModalFocalLoss(alpha=torch.tensor([0.15, 0.85]).to(device), gamma=3.0, beta=0.6)
 
         optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=0.01, amsgrad=False)
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs, eta_min=0.0001)
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs*0.8, eta_min=0.0001)
 
         # create datasets
         train_dataset = PETCTDataset3D(df_train,
@@ -618,7 +618,7 @@ if __name__ == "__main__":
                 model.train()
                 optimizer.zero_grad()
                 i = 0
-                iters_to_accumulate = 32
+                iters_to_accumulate = min(32, len(train_loader))
                 for ct_batch, pet_batch, labels_batch in tqdm(train_loader, position=2, desc='train batch'):
                     ct_batch = ct_batch.to(device)
                     pet_batch = pet_batch.to(device)
@@ -626,8 +626,6 @@ if __name__ == "__main__":
                     labels_batch = torch.squeeze(labels_batch).to(device)
 
                     outputs = model(ct_batch, pet_batch)
-
-                    #loss = criterion(torch.squeeze(outputs[0]), labels_batch) / iters_to_accumulate
 
                     loss = criterion(torch.squeeze(outputs[0]), 
                                      torch.squeeze(outputs[2]),
