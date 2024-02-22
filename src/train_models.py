@@ -56,7 +56,7 @@ class PETCTDataset3D(Dataset):
             self.dataframe.sort_values(by='patient_id_new_int', inplace=True, ascending=False)
             self.dataframe = self.dataframe.groupby(['patient_id'])[['modality', 'dataset', 'label', 'patient_id_new', 'patient_id_new_int']].first()
             self.dataframe.reset_index(inplace=True, drop=False)
-            repeat_times = max(5, int(np.ceil(n_samples / self.dataframe.shape[0])))
+            repeat_times = min(max(3, int(np.ceil(n_samples / self.dataframe.shape[0]))), 1)
             self.dataframe = pd.DataFrame(np.repeat(self.dataframe.values, repeat_times, axis=0), columns=self.dataframe.columns)
         else:
             self.dataframe = self.df_ct.groupby(['patient_id_new'])[['modality', 'dataset', 'label', 'patient_id']].first()
