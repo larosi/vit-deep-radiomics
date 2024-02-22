@@ -748,10 +748,6 @@ if __name__ == "__main__":
                 if df_loss['target_metric'].iloc[-1] >= df_loss['target_metric'].mean():
                     save_checkpoint(model, save_dir, epoch)
 
-                df_loss['target_metric'] = df_loss['test_auc'] * np.sqrt(df_loss['test_auc'] * df_loss['train_auc'])
-                df_loss['is_improvement'] = df_loss['target_metric'] >= df_loss['target_metric'].max()
-                epochs_since_improvement = epoch - df_loss.iloc[df_loss['is_improvement'].argmax()]['epoch']
-
                 if epochs_since_improvement >= patience:
                     print(f"Early stopping triggered after {epoch + 1} epochs")
                     break
