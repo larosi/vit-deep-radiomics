@@ -403,7 +403,7 @@ class FocalLoss(nn.Module):
 
 def find_divisor(slice_count, modality):
     if modality == 'ct':
-        desired_slices = 25
+        desired_slices = 13
     else:
         desired_slices = 2
     return np.clip(desired_slices, 1, slice_count)
