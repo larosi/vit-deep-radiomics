@@ -53,10 +53,10 @@ def export_umap_to_cloud_compare(df, df_umap, dataset, modality='ct', offset=10,
         df[coord] = df[coord] + df_umap[coord]
 
     if to_sketchfab:
-        umap_cc_path = os.path.join('..', 'data', 'points', f'{dataset}_umap.asc')
+        umap_cc_path = os.path.join('..', 'data', 'points', f'{dataset}_{modality}_umap.asc')
         df[['x', 'y', 'z', 'grey', 'grey', 'grey']].astype(int).to_csv(umap_cc_path, sep=' ', index=False, header=False)
     else:
-        umap_cc_path = os.path.join('..', 'data', 'points', f'{dataset}_umap.txt')
+        umap_cc_path = os.path.join('..', 'data', 'points', f'{dataset}_{modality}_umap.txt')
         df[['x', 'y', 'z', 'grey', 'label', 'is_test']].to_csv(umap_cc_path, sep=' ', index=False)
 
 
@@ -92,3 +92,4 @@ if __name__ == "__main__":
 
     df['is_test'] = df['patient_id'].isin(test_patients) * 1
     export_umap_to_cloud_compare(df, df_umap, dataset, modality='ct', offset=10, use_2D=False, to_sketchfab=False)
+    export_umap_to_cloud_compare(df, df_umap, dataset, modality='pet', offset=10, use_2D=False, to_sketchfab=False)
