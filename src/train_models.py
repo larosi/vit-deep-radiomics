@@ -20,8 +20,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader, WeightedRandomSampler
-
-from models_archs import save_checkpoint, TransformerNoduleBimodalClassifier
+from models_archs import (TransformerNoduleBimodalClassifier,
+                          NoduleClassifier,
+                          TransformerNoduleClassifier,
+                          save_checkpoint)
 from config_manager import load_conf
 
 
@@ -56,7 +58,7 @@ class PETCTDataset3D(Dataset):
             self.dataframe.sort_values(by='patient_id_new_int', inplace=True, ascending=False)
             self.dataframe = self.dataframe.groupby(['patient_id'])[['modality', 'dataset', 'label', 'patient_id_new', 'patient_id_new_int']].first()
             self.dataframe.reset_index(inplace=True, drop=False)
-            repeat_times = np.clip(np.ceil(n_samples / self.dataframe.shape[0]), 3, 10)
+            repeat_times = np.clip(np.ceil(n_samples / self.dataframe.shape[0]), 2, 8)
             self.dataframe = pd.DataFrame(np.repeat(self.dataframe.values, repeat_times, axis=0), columns=self.dataframe.columns)
         else:
             self.dataframe = self.df_ct.groupby(['patient_id_new'])[['modality', 'dataset', 'label', 'patient_id']].first()
@@ -106,9 +108,9 @@ class PETCTDataset3D(Dataset):
         if enable_random_crop:  # TODO: move to cfg file
             if self.use_augmentation: # random slice crop
                 if len(ct_slices) > 7:
-                    window_size = np.random.randint(7, len(ct_slices))
-                    start_slice_index = np.random.randint(0, len(ct_slices)-window_size)
-                    end_slice_index = start_slice_index + window_size
+                    window_size = int(np.random.randint(7, len(ct_slices), 1))
+                    start_slice_index = int(np.random.randint(0, len(ct_slices)-window_size))
+                    end_slice_index = int(start_slice_index + window_size)
 
         feature_ids = self.df_ct.loc[(patient_id_rew, angle, flip)]['feature_id'].values[start_slice_index:end_slice_index]
         spatial_res = self.df_ct.loc[(patient_id_rew, angle, flip)]['spatial_res'].values[0]
@@ -135,7 +137,7 @@ class PETCTDataset3D(Dataset):
         labels = self.label_encoder.transform(labels.reshape(-1, 1)).toarray()
         labels = torch.as_tensor(labels, dtype=torch.float32)
 
-        return features_ct, features_pet, labels
+        return features_ct, features_pet, labels, patient_id
 
     def _get_features(self, hdf5_path, patient_id, feature_ids, angle, flip, noise, spatial_res):
         features = []
@@ -256,7 +258,6 @@ def plot_loss_metrics(df_loss, title):
                                         marker_color='green',
                                         name=f'{metric_name}',
                                         hovertext=df_loss['is_improvement']),
-                             
                              row=plot_grid[plot_i][0], col=plot_grid[plot_i][1])
     fig.update_layout(title_text=title.capitalize(), xaxis_title="Epochs",)
     return fig
@@ -330,9 +331,10 @@ class CrossModalFocalLoss(nn.Module):
     """
      Multi-class Cross Modal Focal Loss
     """
-    def __init__(self, gamma=2, alpha=None, beta=0.5):
+    def __init__(self, gamma_bimodal=0, gamma_unimodal=2, alpha=None, beta=0.5):
         super(CrossModalFocalLoss, self).__init__()
-        self.gamma = gamma
+        self.gamma_bimodal = gamma_bimodal
+        self.gamma_unimodal = gamma_unimodal
         self.alpha = alpha
         self.beta = beta
         self.eps = 1e-8
@@ -356,7 +358,7 @@ class CrossModalFocalLoss(nn.Module):
         logpt_pet = F.log_softmax(inputs_pet, dim=1)
 
         pt_petct = torch.exp(logpt_petct)
-        logpt_petct = (1-pt_petct)**self.gamma * logpt_petct
+        logpt_petct = (1-pt_petct)**self.gamma_bimodal * logpt_petct
         loss_petct = F.nll_loss(logpt_petct, class_indices, self.alpha, reduction='mean')
 
         pt_ct = torch.exp(logpt_ct)
@@ -364,10 +366,10 @@ class CrossModalFocalLoss(nn.Module):
 
         pt_mean = (2*pt_ct*pt_pet) / (pt_ct + pt_pet + self.eps)
 
-        logpt_ct = (1-pt_mean*pt_ct)**self.gamma * logpt_ct
+        logpt_ct = (1-pt_mean*pt_ct)**self.gamma_unimodal * logpt_ct
         loss_ct = F.nll_loss(logpt_ct, class_indices, self.alpha, reduction='mean')
 
-        logpt_pet = (1-pt_mean*pt_pet)**self.gamma * logpt_pet
+        logpt_pet = (1-pt_mean*pt_pet)**self.gamma_unimodal * logpt_pet
         loss_pet = F.nll_loss(logpt_pet, class_indices, self.alpha, reduction='mean')
 
         loss = (self.beta*loss_petct + (1-self.beta)*(loss_ct + loss_pet))
@@ -420,10 +422,10 @@ def prepare_df(df):
     df['divisor'] = df[['patient_id', 'modality']].apply(lambda x: slices_per_patient[(x[0], x[1])], axis=1) 
 
     df['patient_id_new'] = df.apply(lambda row: f"{row['patient_id']}:{np.ceil(row['slice']/row['divisor']).astype(int)}", axis=1)
-    
+
     df_pet = df[df['modality'] == 'pet']
     df_ct = df[df['modality'] == 'ct']
-    
+
     patient_ids = df_ct['patient_id'].unique()
     df_aux = []
     for patient_id in patient_ids:
@@ -448,6 +450,39 @@ def get_number_of_params(model):
     param_count = sum([np.prod(p.size()) for p in model_parameters])
     return param_count
 
+def build_model(cfg, arch, modality, num_classes=2):
+    cfg_model = cfg['models'][arch]
+    feature_dim = cfg_model['feature_dim']
+    if modality == 'petct':
+        mlp_ratio_ct = cfg_model['ct']['mlp_ratio']
+        mlp_ratio_pet = cfg_model['pet']['mlp_ratio']
+
+        num_heads_ct = cfg_model['ct']['num_heads']
+        num_heads_pet = cfg_model['pet']['num_heads']
+
+        num_layers_ct = cfg_model['ct']['num_layers']
+        num_layers_pet = cfg_model['pet']['num_layers']
+
+        model = TransformerNoduleBimodalClassifier(feature_dim,
+                                                   mlp_ratio_ct, mlp_ratio_pet,
+                                                   num_heads_ct, num_heads_pet,
+                                                   num_layers_ct, num_layers_pet,
+                                                   num_classes=num_classes)
+    elif arch == 'conv':
+        div = cfg['models'][arch][modality]['div']
+        model = NoduleClassifier(input_dim=feature_dim, num_classes=num_classes, div=div)
+    else:
+        mlp_ratio = cfg_model[modality]['mlp_ratio']
+        num_heads = cfg_model[modality]['num_heads']
+        num_layers = cfg_model[modality]['num_layers']
+        dim_feedforward = int(feature_dim*mlp_ratio)
+        model = TransformerNoduleClassifier(input_dim=feature_dim,
+                                            dim_feedforward=dim_feedforward,
+                                            num_heads=num_heads,
+                                            num_classes=num_classes,
+                                            num_layers=num_layers)
+    return model
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train 3D transoformer or CNN for lung nodules clasification")
     parser.add_argument("-a", "--arch", type=str, default="transformer",
@@ -458,34 +493,28 @@ if __name__ == "__main__":
                         help="backbone ViT encoder 'medsam' or 'dinov2'")
     parser.add_argument("-m", "--modality", type=str, default="petct",
                         help="'ct', 'pet' or 'petct'")
-
+    parser.add_argument("-gpu", "--gpu", type=int, default=0,
+                        help="id of gpu device, default is cuda:0")
     args = parser.parse_args()
 
     arch = args.arch
     backbone = args.backbone
     modality = args.modality
+    gpu_id = args.gpu
     use_sampler = False
     arg_dataset = args.dataset
 
     desired_datasets = [arg_dataset]
 
-    if modality == 'petct':
-        desired_modalities = ['pet', 'ct']
-    else:
-        desired_modalities = [modality]
-
     hdf5_pet_path = os.path.join('..', 'data', 'features', 'features_masks_pet.hdf5')
     hdf5_ct_path = os.path.join('..', 'data', 'features', 'features_masks_ct.hdf5')
     df_path = os.path.join('..', 'data', 'features', 'petct.parquet')
-    #models_save_dir = os.path.join('..', 'models', 'petct')  # TODO:  generate an unique experiment ID
     models_save_dir = os.path.join('..', 'models', 'petct', f'{backbone}_{arch}_{arg_dataset}')
-    
+
     cfg = load_conf()
 
     # load dataframe and apply some filter criteria
     df = pd.read_parquet(df_path)
-    df= df[df['dataset'].isin(desired_datasets)]
-    df = df[df['modality'].isin(desired_modalities)]
     df['flip'] = df['flip'].astype(str)
     df.reset_index(drop=True, inplace=True)
     df = prepare_df(df)
@@ -515,7 +544,7 @@ if __name__ == "__main__":
 
     # use KFold to split patients stratified by label
     folds = list(cfg['kfold_patients'][arg_dataset].keys())
-    for kfold in tqdm(folds, desc='kfold', leave=False, position=0):   
+    for kfold in tqdm(folds, desc='kfold', leave=False, position=0):
         save_dir = os.path.join(models_save_dir, modality, f'kfold_{kfold}')
         os.makedirs(save_dir, exist_ok=True)
 
@@ -530,44 +559,29 @@ if __name__ == "__main__":
         df_train.reset_index(drop=True, inplace=True)
         df_test.reset_index(drop=True, inplace=True)
 
-        #  TODO: define training parameters in a .yaml file
-
-        batch_size = 1  # TODO: add support for bigger batches using zero padding to create batches of the same size
-        start_epoch = 0
-        num_epochs = 50
-
         cfg_model = cfg['models'][arch]
         learning_rate = cfg_model['learning_rate']
         feature_dim = cfg_model['feature_dim']
-
-        mlp_ratio_ct = cfg_model['ct']['mlp_ratio']
-        mlp_ratio_pet = cfg_model['pet']['mlp_ratio']
-
-        num_heads_ct = cfg_model['ct']['num_heads']
-        num_heads_pet = cfg_model['pet']['num_heads']
-
-        num_layers_ct = cfg_model['ct']['num_layers']
-        num_layers_pet = cfg_model['pet']['num_layers']
+        batch_size = cfg_model['batch_size']  # TODO: add support for bigger batches using zero padding to create batches of the same size
+        virtual_batch_size = cfg_model['virtual_batch_size']
+        start_epoch = 0 # TODO: make it able to start from a checkpoint
+        num_epochs = cfg_model['num_epochs']
 
         # Create model instance
-        device = f'cuda:{torch.cuda.current_device()}'
-
-        model = TransformerNoduleBimodalClassifier(feature_dim,
-                                                   mlp_ratio_ct, mlp_ratio_pet,
-                                                   num_heads_ct, num_heads_pet,
-                                                   num_layers_ct, num_layers_pet,
-                                                   num_classes=len(EGFR_lm))
+        model = build_model(cfg, arch, modality, num_classes=2)
 
         print(model)
         print(get_number_of_params(model))
+        device = f'cuda:{gpu_id}'
         model = model.to(device)
 
-        # CrossEntropyLoss because the last layer has one output per class (mutant, wildtype)
-
-        #criterion = nn.CrossEntropyLoss()
-        #criterion = FocalLoss(alpha=torch.tensor([0.25, 0.75]).to(device), gamma=2.0)
-        #criterion = CrossModalFocalLoss(alpha=torch.tensor([0.25, 0.75]).to(device), gamma=2.5, beta=0.6)
-        criterion = CrossModalFocalLoss(alpha=torch.tensor([0.15, 0.85]).to(device), gamma=3.0, beta=0.6)
+        if modality == 'petct':
+            criterion = CrossModalFocalLoss(alpha=torch.tensor([0.15, 0.85]).to(device),
+                                            gamma_unimodal=3.0,
+                                            gamma_bimodal=0.0,
+                                            beta=0.6)
+        else:
+            criterion = FocalLoss(alpha=torch.tensor([0.25, 0.75]).to(device), gamma=2.0)
 
         optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=0.01, amsgrad=False)
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs*0.8, eta_min=0.0001)
@@ -610,32 +624,40 @@ if __name__ == "__main__":
 
                 y_true_train = []
                 y_score_train = []
+                patient_ids_train = []
 
                 y_true_test = []
                 y_score_test = []
+                patient_ids_test = []
 
                 # train loop
                 model.train()
                 optimizer.zero_grad()
                 i = 0
-                iters_to_accumulate = min(32, len(train_loader))
-                for ct_batch, pet_batch, labels_batch in tqdm(train_loader, position=2, desc='train batch'):
-                    ct_batch = ct_batch.to(device)
-                    pet_batch = pet_batch.to(device)
-
+                iters_to_accumulate = min(virtual_batch_size, len(train_loader))
+                for ct_batch, pet_batch, labels_batch, patient_id_batch in tqdm(train_loader, position=2, desc='train batch'):
                     labels_batch = torch.squeeze(labels_batch).to(device)
-
-                    outputs = model(ct_batch, pet_batch)
-
-                    loss = criterion(torch.squeeze(outputs[0]), 
-                                     torch.squeeze(outputs[2]),
-                                     torch.squeeze(outputs[3]),
-                                     labels_batch) / iters_to_accumulate
-
+                    if modality == 'petct':
+                        ct_batch = ct_batch.to(device)
+                        pet_batch = pet_batch.to(device)
+                        outputs = model(ct_batch, pet_batch)
+                        loss = criterion(torch.squeeze(outputs[0]),
+                                         torch.squeeze(outputs[2]),
+                                         torch.squeeze(outputs[3]),
+                                         labels_batch) / iters_to_accumulate
+                    elif modality == 'pet':
+                        pet_batch = pet_batch.to(device)
+                        outputs = model(pet_batch)
+                        loss = criterion(torch.squeeze(outputs[0]), labels_batch) / iters_to_accumulate
+                    elif modality == 'ct':
+                        ct_batch = ct_batch.to(device)
+                        outputs = model(ct_batch)
+                        loss = criterion(torch.squeeze(outputs[0]), labels_batch) / iters_to_accumulate
                     y_true, y_score = get_y_true_and_pred(y_true=labels_batch, y_pred=outputs[0], cpu=True)
 
                     y_true_train.append(y_true)
                     y_score_train.append(y_score)
+                    patient_ids_train.append(np.array(patient_id_batch))
 
                     total_train_loss += loss.item() * iters_to_accumulate
 
@@ -648,23 +670,30 @@ if __name__ == "__main__":
                 # test loop
                 model.eval()
                 with torch.no_grad():
-                    for ct_batch, pet_batch, labels_batch in tqdm(test_loader, position=2, desc='test batch'):
-                        ct_batch = ct_batch.to(device)
-                        pet_batch = pet_batch.to(device)
+                    for ct_batch, pet_batch, labels_batch, patient_id_batch in tqdm(test_loader, position=2, desc='test batch'):
                         labels_batch = torch.squeeze(labels_batch).to(device)
-
-                        outputs = model(ct_batch, pet_batch)
-
-                        #loss = criterion(torch.squeeze(outputs[0]), labels_batch)
-                        loss = criterion(torch.squeeze(outputs[0]),
-                                         torch.squeeze(outputs[2]),
-                                         torch.squeeze(outputs[3]),
-                                         labels_batch)
+                        if modality == 'petct':
+                            ct_batch = ct_batch.to(device)
+                            pet_batch = pet_batch.to(device)
+                            outputs = model(ct_batch, pet_batch)
+                            loss = criterion(torch.squeeze(outputs[0]),
+                                             torch.squeeze(outputs[2]),
+                                             torch.squeeze(outputs[3]),
+                                             labels_batch)
+                        elif modality == 'pet':
+                            pet_batch = pet_batch.to(device)
+                            outputs = model(pet_batch)
+                            loss = criterion(torch.squeeze(outputs[0]), labels_batch)
+                        elif modality == 'ct':
+                            ct_batch = ct_batch.to(device)
+                            outputs = model(ct_batch)
+                            loss = criterion(torch.squeeze(outputs[0]), labels_batch)
 
                         y_true, y_score = get_y_true_and_pred(y_true=labels_batch, y_pred=outputs[0], cpu=True)
 
                         y_true_test.append(y_true)
                         y_score_test.append(y_score)
+                        patient_ids_test.append(np.array(patient_id_batch))
 
                         total_test_loss += loss.item()
 
@@ -676,15 +705,33 @@ if __name__ == "__main__":
                 batch_pbar.update()
 
                 # generate y_true and y_pred for each split in the epoch
-                y_true_train = np.concatenate(y_true_train, axis=0)
-                y_score_train = np.concatenate(y_score_train, axis=0)
-                y_score_train = y_score_train[:, 1]
-                y_pred_train = (y_score_train >= 0.5)*1
+                # aggregate predictions and metrics per patient_id
+                df_batch_train = pd.DataFrame()
+                df_batch_test = pd.DataFrame()
 
-                y_true_test = np.concatenate(y_true_test, axis=0)
-                y_score_test = np.concatenate(y_score_test, axis=0)
-                y_score_test = y_score_test[:, 1]
-                y_pred_test = (y_score_test >= 0.5)*1
+                df_batch_train['y_true'] = np.concatenate(y_true_train, axis=0)
+                df_batch_train['y_score'] = np.concatenate(y_score_train, axis=0)[:, 1]
+
+                df_batch_train['patient_id'] = np.concatenate(patient_ids_train, axis=0)
+
+                df_batch_test['y_true'] = np.concatenate(y_true_test, axis=0)
+                df_batch_test['y_score'] = np.concatenate(y_score_test, axis=0)[:, 1]
+
+                df_batch_test['patient_id'] = np.concatenate(patient_ids_test, axis=0)
+
+                df_batch_train = df_batch_train.groupby('patient_id').mean()
+                df_batch_test = df_batch_test.groupby('patient_id').mean()
+
+                df_batch_train['y_pred'] = (df_batch_train['y_score'] >= 0.5)*1.0
+                df_batch_test['y_pred'] = (df_batch_test['y_score'] >= 0.5)*1.0
+
+                y_score_train = df_batch_train[['y_score']].values
+                y_pred_train = df_batch_train[['y_pred']].values
+                y_true_train = df_batch_train[['y_true']].values
+
+                y_score_test = df_batch_test[['y_score']].values
+                y_pred_test = df_batch_test[['y_pred']].values
+                y_true_test = df_batch_test[['y_true']].values
 
                 # create a clasification report of each split
                 roc_auc_test = roc_auc_score(y_true_test, y_score_test)
@@ -715,7 +762,7 @@ if __name__ == "__main__":
                     json.dump(test_report, file)
 
                 # save a plot of the train an test loss
-                train_metrics['kfold'].append(kfold)  # TODO: plot train and test report instead just loss values
+                train_metrics['kfold'].append(kfold)
                 train_metrics['epoch'].append(epoch)
                 train_metrics['train_loss'].append(avg_train_loss)
                 train_metrics['test_loss'].append(avg_test_loss)
@@ -730,7 +777,7 @@ if __name__ == "__main__":
                 df_loss = df_loss[df_loss['kfold'] == kfold]
 
                 # early stoping
-                patience = 15
+                patience = cfg_model['patience']
 
                 df_loss['target_metric'] = df_loss['test_auc'] * np.sqrt(df_loss['test_auc'] * df_loss['train_auc']) * np.sqrt(df_loss['test_f1'] * df_loss['train_f1'])
                 df_loss['is_improvement'] = df_loss['target_metric'] >= df_loss['target_metric'].max()
