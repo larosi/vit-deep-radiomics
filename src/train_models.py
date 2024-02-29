@@ -495,6 +495,8 @@ if __name__ == "__main__":
                         help="'ct', 'pet' or 'petct'")
     parser.add_argument("-gpu", "--gpu", type=int, default=0,
                         help="id of gpu device, default is cuda:0")
+    parser.add_argument("-l", "--loss", type=str, default='focal',
+                        help="'focal' 'crossmodal'")
     args = parser.parse_args()
 
     arch = args.arch
@@ -503,6 +505,7 @@ if __name__ == "__main__":
     gpu_id = args.gpu
     use_sampler = False
     arg_dataset = args.dataset
+    loss_func = args.loss
 
     desired_datasets = [arg_dataset]
 
@@ -575,7 +578,7 @@ if __name__ == "__main__":
         device = f'cuda:{gpu_id}'
         model = model.to(device)
 
-        if modality == 'petct':
+        if loss_func == 'crossmodal':
             criterion = CrossModalFocalLoss(alpha=torch.tensor([0.15, 0.85]).to(device),
                                             gamma_unimodal=3.0,
                                             gamma_bimodal=0.0,
@@ -641,17 +644,18 @@ if __name__ == "__main__":
                         ct_batch = ct_batch.to(device)
                         pet_batch = pet_batch.to(device)
                         outputs = model(ct_batch, pet_batch)
+                    elif modality == 'pet':
+                        pet_batch = pet_batch.to(device)
+                        outputs = model(pet_batch)
+                    elif modality == 'ct':
+                        ct_batch = ct_batch.to(device)
+                        outputs = model(ct_batch)
+                    if loss_func == 'crossmodal':
                         loss = criterion(torch.squeeze(outputs[0]),
                                          torch.squeeze(outputs[2]),
                                          torch.squeeze(outputs[3]),
                                          labels_batch) / iters_to_accumulate
-                    elif modality == 'pet':
-                        pet_batch = pet_batch.to(device)
-                        outputs = model(pet_batch)
-                        loss = criterion(torch.squeeze(outputs[0]), labels_batch) / iters_to_accumulate
-                    elif modality == 'ct':
-                        ct_batch = ct_batch.to(device)
-                        outputs = model(ct_batch)
+                    else:
                         loss = criterion(torch.squeeze(outputs[0]), labels_batch) / iters_to_accumulate
                     y_true, y_score = get_y_true_and_pred(y_true=labels_batch, y_pred=outputs[0], cpu=True)
 
@@ -676,19 +680,19 @@ if __name__ == "__main__":
                             ct_batch = ct_batch.to(device)
                             pet_batch = pet_batch.to(device)
                             outputs = model(ct_batch, pet_batch)
+                        elif modality == 'pet':
+                            pet_batch = pet_batch.to(device)
+                            outputs = model(pet_batch)
+                        elif modality == 'ct':
+                            ct_batch = ct_batch.to(device)
+                            outputs = model(ct_batch)
+                        if loss_func == 'crossmodal':
                             loss = criterion(torch.squeeze(outputs[0]),
                                              torch.squeeze(outputs[2]),
                                              torch.squeeze(outputs[3]),
                                              labels_batch)
-                        elif modality == 'pet':
-                            pet_batch = pet_batch.to(device)
-                            outputs = model(pet_batch)
+                        else:
                             loss = criterion(torch.squeeze(outputs[0]), labels_batch)
-                        elif modality == 'ct':
-                            ct_batch = ct_batch.to(device)
-                            outputs = model(ct_batch)
-                            loss = criterion(torch.squeeze(outputs[0]), labels_batch)
-
                         y_true, y_score = get_y_true_and_pred(y_true=labels_batch, y_pred=outputs[0], cpu=True)
 
                         y_true_test.append(y_true)
