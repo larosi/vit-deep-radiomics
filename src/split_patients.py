@@ -20,7 +20,7 @@ df = df[df['modality'] == 'ct']
 df = df[~df['patient_id'].isin(drop_patients)]
 df.reset_index(inplace=True, drop=True)
 kfold_patients = {}
-skf = StratifiedKFold(n_splits=3, shuffle=True, random_state=42)
+skf = StratifiedKFold(n_splits=10, shuffle=True, random_state=42)
 for dataset in df['dataset'].unique():
     patients_labels = df[df['dataset'] == dataset].groupby(['patient_id'])['label'].first()
     patients = patients_labels.index.to_list()
