@@ -320,10 +320,11 @@ def get_sampler_weights(train_labels):
         weights (list): a weight for each element in the dataloader.
 
     """
-    labels_mean = train_labels.mean()
-    weight_for_0 = (1 - labels_mean)
-    weight_for_1 = labels_mean
-    weights = [1/weight_for_0 if lb == 0 else 1/weight_for_1 for lb in train_labels]
+
+    label_value, counts = np.unique(train_labels, return_counts=True)
+    labels_counts = dict(zip(label_value, counts))
+    weights = [1/labels_counts[lb] for lb in train_labels]
+
     return weights
 
 
@@ -483,6 +484,17 @@ def build_model(cfg, arch, modality, num_classes=2):
                                             num_layers=num_layers)
     return model
 
+
+def get_label_encoder(df):
+    EGFR_names = list(df['label'].unique())
+    EGFR_names.sort()
+    EGFR_lm, EGFR_lm_inv = create_labelmap(EGFR_names)
+    
+    EGFR_encoder = OneHotEncoder(handle_unknown='ignore')
+    EGFR_encoder.fit(np.array(list(EGFR_lm.keys())).reshape(-1, 1))
+    return EGFR_encoder
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train 3D transoformer or CNN for lung nodules clasification")
     parser.add_argument("-a", "--arch", type=str, default="transformer",
@@ -497,6 +509,8 @@ if __name__ == "__main__":
                         help="id of gpu device, default is cuda:0")
     parser.add_argument("-l", "--loss", type=str, default='focal',
                         help="'focal' 'crossmodal'")
+    parser.add_argument("-e", "--experiment", type=str, default='petct',
+                        help="experiment name")
     args = parser.parse_args()
 
     arch = args.arch
@@ -506,13 +520,13 @@ if __name__ == "__main__":
     use_sampler = False
     arg_dataset = args.dataset
     loss_func = args.loss
-
+    experiment_name = args.experiment
     desired_datasets = [arg_dataset]
 
     hdf5_pet_path = os.path.join('..', 'data', 'features', 'features_masks_pet.hdf5')
     hdf5_ct_path = os.path.join('..', 'data', 'features', 'features_masks_ct.hdf5')
     df_path = os.path.join('..', 'data', 'features', 'petct.parquet')
-    models_save_dir = os.path.join('..', 'models', 'petct', f'{backbone}_{arch}_{arg_dataset}')
+    models_save_dir = os.path.join('..', 'models', experiment_name, f'{backbone}_{arch}_{arg_dataset}')
 
     cfg = load_conf()
 
@@ -523,17 +537,7 @@ if __name__ == "__main__":
     df = prepare_df(df)
 
     # create labelmap and onehot enconder for nodule EGFR mutation
-    EGFR_names = list(df['label'].unique())
-    EGFR_names.sort()
-    EGFR_lm, EGFR_lm_inv = create_labelmap(EGFR_names)
-
-    EGFR_encoder = OneHotEncoder(handle_unknown='ignore')
-    EGFR_encoder.fit(np.array(list(EGFR_lm.keys())).reshape(-1, 1))
-
-    print('labelmap:')
-    print(EGFR_lm)
-    print(EGFR_encoder.transform(np.array(list(EGFR_lm.keys())).reshape(-1, 1)).toarray())
-
+    EGFR_encoder = get_label_encoder(df)
     train_metrics = {'kfold': [],
                      'epoch': [],
                      'train_loss': [],
@@ -579,9 +583,9 @@ if __name__ == "__main__":
         model = model.to(device)
 
         if loss_func == 'crossmodal':
-            criterion = CrossModalFocalLoss(alpha=torch.tensor([0.15, 0.85]).to(device),
-                                            gamma_unimodal=3.0,
-                                            gamma_bimodal=0.0,
+            criterion = CrossModalFocalLoss(alpha=torch.tensor([0.25, 0.75]).to(device),
+                                            gamma_unimodal=2.0,
+                                            gamma_bimodal=1.0,
                                             beta=0.6)
         else:
             criterion = FocalLoss(alpha=torch.tensor([0.25, 0.75]).to(device), gamma=2.0)
@@ -710,45 +714,37 @@ if __name__ == "__main__":
 
                 # generate y_true and y_pred for each split in the epoch
                 # aggregate predictions and metrics per patient_id
-                df_batch_train = pd.DataFrame()
-                df_batch_test = pd.DataFrame()
 
-                df_batch_train['y_true'] = np.concatenate(y_true_train, axis=0)
-                df_batch_train['y_score'] = np.concatenate(y_score_train, axis=0)[:, 1]
+                patient_ids_train = np.concatenate(patient_ids_train, axis=0)
+                patient_ids_test = np.concatenate(patient_ids_test, axis=0)
 
-                df_batch_train['patient_id'] = np.concatenate(patient_ids_train, axis=0)
+                sample_weight_train = get_sampler_weights(patient_ids_train)
+                sample_weight_test = get_sampler_weights(patient_ids_test)
 
-                df_batch_test['y_true'] = np.concatenate(y_true_test, axis=0)
-                df_batch_test['y_score'] = np.concatenate(y_score_test, axis=0)[:, 1]
+                y_score_train = np.concatenate(y_score_train, axis=0)[:, 1]
+                y_true_train == np.concatenate(y_true_train, axis=0)
+                y_pred_train = (y_score_train >= 0.5)*1
 
-                df_batch_test['patient_id'] = np.concatenate(patient_ids_test, axis=0)
-
-                df_batch_train = df_batch_train.groupby('patient_id').mean()
-                df_batch_test = df_batch_test.groupby('patient_id').mean()
-
-                df_batch_train['y_pred'] = (df_batch_train['y_score'] >= 0.5)*1.0
-                df_batch_test['y_pred'] = (df_batch_test['y_score'] >= 0.5)*1.0
-
-                y_score_train = df_batch_train[['y_score']].values
-                y_pred_train = df_batch_train[['y_pred']].values
-                y_true_train = df_batch_train[['y_true']].values
-
-                y_score_test = df_batch_test[['y_score']].values
-                y_pred_test = df_batch_test[['y_pred']].values
-                y_true_test = df_batch_test[['y_true']].values
+                y_score_test = np.concatenate(y_score_test, axis=0)[:, 1]
+                y_true_test == np.concatenate(y_true_test, axis=0)
+                y_pred_test = (y_score_test >= 0.5)*1
 
                 # create a clasification report of each split
-                roc_auc_test = roc_auc_score(y_true_test, y_score_test)
-                roc_auc_train = roc_auc_score(y_true_train, y_score_train)
+                roc_auc_test = roc_auc_score(y_true_test, y_score_test, sample_weight=sample_weight_test)
+                roc_auc_train = roc_auc_score(y_true_train, y_score_train, sample_weight=sample_weight_train)
 
-                train_report = classification_report(y_true_train, y_pred_train, output_dict=True, zero_division=0)
+                train_report = classification_report(y_true_train, y_pred_train,
+                                                     output_dict=True, zero_division=0,
+                                                     sample_weight=sample_weight_train)
                 train_report['ROC AUC'] = roc_auc_train
                 train_report['kfold'] = kfold
                 train_report['loss'] = avg_train_loss
                 train_report['epoch'] = epoch
                 train_report['split'] = 'train'
 
-                test_report = classification_report(y_true_test, y_pred_test, output_dict=True, zero_division=0)
+                test_report = classification_report(y_true_test, y_pred_test,
+                                                    output_dict=True, zero_division=0,
+                                                    sample_weight=sample_weight_test)
                 test_report['ROC AUC'] = roc_auc_test
                 test_report['kfold'] = kfold
                 test_report['loss'] = avg_test_loss
@@ -783,7 +779,8 @@ if __name__ == "__main__":
                 # early stoping
                 patience = cfg_model['patience']
 
-                df_loss['target_metric'] = df_loss['test_auc'] * np.sqrt(df_loss['test_auc'] * df_loss['train_auc']) * np.sqrt(df_loss['test_f1'] * df_loss['train_f1'])
+                #df_loss['target_metric'] = df_loss['test_auc'] * np.sqrt(df_loss['test_auc'] * df_loss['train_auc']) * np.sqrt(df_loss['test_f1'] * df_loss['train_f1'])
+                df_loss['target_metric'] = df_loss['test_auc'] * df_loss['test_auc'] * np.sqrt(df_loss['test_f1'])
                 df_loss['is_improvement'] = df_loss['target_metric'] >= df_loss['target_metric'].max()
 
                 fig = plot_loss_metrics(df_loss, title=f'{arg_dataset} fold {kfold}')
