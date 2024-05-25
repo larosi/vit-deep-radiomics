@@ -67,7 +67,7 @@ class TransformerNoduleBimodalClassifier(nn.Module):
         self.classifier_ct = MLPLayer(input_dim, input_dim*2, num_classes, dropout_rate=0.1)
         self.classifier_pet = MLPLayer(input_dim, input_dim*2, num_classes, dropout_rate=0.1)
 
-        self.projection_petct = MLPLayer(input_dim*2, input_dim, input_dim, dropout_rate=0.1) #nn.Linear(input_dim*2, input_dim, bias=True)
+        self.projection_petct = MLPLayer(input_dim*2, input_dim, input_dim, dropout_rate=0.1)
 
         self.cross_attention_ct = CrossAttentionLayer(input_dim, num_heads_ct)
         self.cross_attention_pet = CrossAttentionLayer(input_dim, num_heads_ct)
@@ -112,153 +112,17 @@ class TransformerNoduleBimodalClassifier(nn.Module):
 
         elif use_ct:
             logits_ct = self.classifier_ct(ct_cls_token)
+            logits_pet = logits_ct
             logits_petct = logits_ct
             petct_cls_token = ct_cls_token
         else:
             logits_pet = self.classifier_pet(pet_cls_token)
+            logits_ct = logits_pet
             logits_petct = logits_pet
             petct_cls_token = pet_cls_token
 
         return logits_petct, petct_cls_token, logits_ct, logits_pet
 
-
-class TransformerNoduleBimodalClassifierV3(nn.Module):
-    def __init__(self, input_dim,
-                 mlp_ratio_ct, mlp_ratio_pet,
-                 num_heads_ct, num_heads_pet,
-                 num_layers_ct, num_layers_pet,
-                 num_classes):
-        super(TransformerNoduleBimodalClassifier, self).__init__()
-        """
-        self.transformer_encoder_petct = nn.TransformerEncoder(nn.TransformerEncoderLayer(d_model=input_dim,
-                                                                                          dim_feedforward=int(mlp_ratio_pet*input_dim),
-                                                                                          nhead=num_heads_ct,
-                                                                                          activation="gelu",
-                                                                                          batch_first=True,
-                                                                                          dropout=0.3),
-                                                               num_layers=1)
-        """
-        self.transformer_encoder_ct = nn.TransformerEncoder(nn.TransformerEncoderLayer(d_model=input_dim,
-                                                                                       dim_feedforward=int(mlp_ratio_ct*input_dim),
-                                                                                       nhead=num_heads_ct,
-                                                                                       activation="gelu",
-                                                                                       batch_first=True,
-                                                                                       dropout=0.5),
-                                                            num_layers=num_layers_ct)
-        self.transformer_encoder_pet = nn.TransformerEncoder(nn.TransformerEncoderLayer(d_model=input_dim,
-                                                                                        dim_feedforward=int(mlp_ratio_pet*input_dim),
-                                                                                        nhead=num_heads_pet,
-                                                                                        activation="gelu",
-                                                                                        batch_first=True,
-                                                                                        dropout=0.5),
-                                                             num_layers=num_layers_pet)
-
-        self.norm_ct = nn.LayerNorm(input_dim)
-        self.norm_pet = nn.LayerNorm(input_dim)
-        #self.norm_petct = nn.LayerNorm(input_dim)
-
-        self.cls_token_ct = nn.Parameter(torch.randn(1, 1, input_dim))
-        self.cls_token_pet = nn.Parameter(torch.randn(1, 1, input_dim))
-
-        self.classifier_ct = MLPLayer(input_dim, input_dim*2, num_classes, dropout_rate=0.2)
-        self.classifier_pet = MLPLayer(input_dim, input_dim*2, num_classes, dropout_rate=0.2)
-
-        #self.cls_token_petct = nn.Parameter(torch.randn(1, 1, input_dim))
-        self.cross_attention_ct = CrossAttentionLayer(input_dim, num_heads_ct)
-        self.cross_attention_pet = CrossAttentionLayer(input_dim, num_heads_ct)
-        #self.classifier_petct = MLPLayer(input_dim, input_dim*2, num_classes, dropout_rate=0.2)
-
-    def forward(self, x_ct=None, x_pet=None):
-        use_ct = x_ct is not None
-        use_pet = x_pet is not None
-        assert use_ct or use_pet, "At least one modality should be used"
-        # add cls token and norm to each pet ct seq
-        if use_ct:
-            batch, seq_len, feature_dim = x_ct.shape
-            x_ct = torch.cat([self.cls_token_ct.repeat(batch, 1, 1), x_ct], dim=1)
-            x_ct = self.norm_ct(x_ct)
-            x_ct = self.transformer_encoder_ct(x_ct)
-            ct_cls_token = x_ct[:, 0, :]
-        else:
-            ct_cls_token = self.cls_token_ct.repeat(1, 1, 1)
-
-        if use_pet:
-            batch, seq_len, feature_dim = x_pet.shape
-            x_pet = torch.cat([self.cls_token_pet.repeat(batch, 1, 1), x_pet], dim=1)
-            x_pet = self.norm_pet(x_pet)
-            x_pet = self.transformer_encoder_pet(x_pet)
-            pet_cls_token = x_pet[:, 0, :]
-        else:
-            pet_cls_token = self.cls_token_pet.repeat(1, 1, 1)
-
-        # cross attention between pet-ct and ct-pet
-        if use_ct and use_pet:
-            x_ct_attn = self.cross_attention_ct(query=x_ct, key=x_pet, value=x_pet)
-            x_pet_attn = self.cross_attention_pet(query=x_pet, key=x_ct, value=x_ct)
-            ct_cls_token = x_ct_attn[:, 0, :]
-            pet_cls_token = x_pet_attn[:, 0, :]
-
-            logits_ct = self.classifier_ct(ct_cls_token)
-            logits_pet = self.classifier_pet(pet_cls_token)
-
-            logits_petct = logits_ct + logits_pet
-            petct_cls_token = ct_cls_token + pet_cls_token
-
-        elif use_ct:
-            logits_ct = self.classifier_ct(ct_cls_token)
-            logits_petct = logits_ct
-            petct_cls_token = ct_cls_token
-        else:
-            logits_pet = self.classifier_pet(pet_cls_token)
-            logits_petct = logits_pet
-            petct_cls_token = pet_cls_token
-
-        return logits_petct, petct_cls_token, ct_cls_token, pet_cls_token
-
-
-class TransformerNoduleBimodalClassifierV1(nn.Module):
-    def __init__(self, input_dim,
-                 mlp_ratio_ct, mlp_ratio_pet,
-                 num_heads_ct, num_heads_pet,
-                 num_layers_ct, num_layers_pet,
-                 num_classes):
-        super(TransformerNoduleBimodalClassifier, self).__init__()
-        self.transformer_encoder_ct = nn.TransformerEncoder(nn.TransformerEncoderLayer(d_model=input_dim,
-                                                                                       dim_feedforward=int(mlp_ratio_ct*input_dim),
-                                                                                       nhead=num_heads_ct,
-                                                                                       activation="gelu",
-                                                                                       batch_first=True,
-                                                                                       dropout=0.5),
-                                                            num_layers=num_layers_ct)
-        self.transformer_encoder_pet = nn.TransformerEncoder(nn.TransformerEncoderLayer(d_model=input_dim,
-                                                                                        dim_feedforward=int(mlp_ratio_pet*input_dim),
-                                                                                        nhead=num_heads_pet,
-                                                                                        activation="gelu",
-                                                                                        batch_first=True,
-                                                                                        dropout=0.5),
-                                                             num_layers=num_layers_pet)
-        self.transformer_encoder_petct = nn.TransformerEncoder(nn.TransformerEncoderLayer(d_model=input_dim,
-                                                                                          dim_feedforward=int(mlp_ratio_pet*input_dim),
-                                                                                          nhead=num_heads_pet,
-                                                                                          activation="gelu",
-                                                                                          batch_first=True,
-                                                                                          dropout=0.5),
-                                                               num_layers=1)
-
-        
-
-        self.norm_ct = nn.LayerNorm(input_dim)
-        self.norm_pet = nn.LayerNorm(input_dim)
-
-        self.cls_token_ct = nn.Parameter(torch.randn(1, 1, input_dim))
-        self.cls_token_pet = nn.Parameter(torch.randn(1, 1, input_dim))
-
-        self.classifier_ct = MLPLayer(input_dim, input_dim*2, num_classes, dropout_rate=0.1)
-        self.classifier_pet = MLPLayer(input_dim, input_dim*2, num_classes, dropout_rate=0.1)
-
-        self.cls_token_petct = nn.Parameter(torch.randn(1, 1, input_dim))
-        self.cross_attention = CrossAttentionLayer(input_dim, num_heads_ct)
-        self.classifier_petct = MLPLayer(input_dim, input_dim*2, num_classes, dropout_rate=0.2)
 
     def forward(self, x_ct, x_pet=None):
 
@@ -288,69 +152,6 @@ class TransformerNoduleBimodalClassifierV1(nn.Module):
 
         x_petct = self.transformer_encoder_petct(x_petct)
 
-        petct_cls_token = x_petct[:, 0, :]
-        logits_petct = self.classifier_petct(petct_cls_token) 
- 
-        return logits_petct, petct_cls_token, logits_ct, logits_pet
-
-
-class TransformerNoduleBimodalClassifierV2(nn.Module):
-    def __init__(self, input_dim,
-                 mlp_ratio_ct, mlp_ratio_pet,
-                 num_heads_ct, num_heads_pet,
-                 num_layers_ct, num_layers_pet,
-                 num_classes):
-        super(TransformerNoduleBimodalClassifier, self).__init__()
-
-        self.transformer_encoder_petct = nn.TransformerEncoder(nn.TransformerEncoderLayer(d_model=input_dim,
-                                                                                          dim_feedforward=int(mlp_ratio_pet*input_dim),
-                                                                                          nhead=num_heads_pet,
-                                                                                          activation="gelu",
-                                                                                          batch_first=True,
-                                                                                          dropout=0.5),
-                                                               num_layers=1)
-
-        
-
-        self.norm_ct = nn.LayerNorm(input_dim)
-        self.norm_pet = nn.LayerNorm(input_dim)
-
-        self.cls_token_ct = nn.Parameter(torch.randn(1, 1, input_dim))
-        self.cls_token_pet = nn.Parameter(torch.randn(1, 1, input_dim))
-
-        self.classifier_ct = MLPLayer(input_dim, input_dim*2, num_classes, dropout_rate=0.1)
-        self.classifier_pet = MLPLayer(input_dim, input_dim*2, num_classes, dropout_rate=0.1)
-
-        self.cls_token_petct = nn.Parameter(torch.randn(1, 1, input_dim))
-        self.cross_attention = CrossAttentionLayer(input_dim, num_heads_ct)
-        self.classifier_petct = MLPLayer(input_dim, input_dim*2, num_classes, dropout_rate=0.2)
-
-    def forward(self, x_ct, x_pet=None):
-
-        batch, seq_len, feature_dim = x_ct.shape
-        
-        # add cls token and norm to each pet ct seq
-        x_ct = torch.cat([self.cls_token_ct.repeat(batch, 1, 1), x_ct], dim=1)
-        x_pet = torch.cat([self.cls_token_pet.repeat(batch, 1, 1), x_pet], dim=1)
-        x_ct = self.norm_ct(x_ct)
-        x_pet = self.norm_pet(x_pet)
-        
-        # encode and classify each modality in an independent branch
-
-        # cross attention between pet-ct and ct-pet
-        x_ct_attn = self.cross_attention(query=x_ct, key=x_pet, value=x_pet)
-        x_pet_attn = self.cross_attention(query=x_pet, key=x_ct, value=x_ct)
-
-        logits_ct = self.classifier_ct(x_ct_attn[:, 0, :])
-        logits_pet = self.classifier_pet(x_pet_attn[:, 0, :])
-
-        #concatenate encoded modalities features into a single seq and classify
-        x_petct = torch.cat([x_ct_attn, x_pet_attn], dim=1)  
-
-        x_petct = torch.cat([self.cls_token_petct.repeat(batch, 1, 1), x_petct], dim=1) 
-
-        x_petct = self.transformer_encoder_petct(x_petct)
-        
         petct_cls_token = x_petct[:, 0, :]
         logits_petct = self.classifier_petct(petct_cls_token) 
  
