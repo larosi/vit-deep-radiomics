@@ -155,8 +155,14 @@ def save_features(filename, all_features, all_masks, patient_id):
             del h5f[patient_id]
         patient_group = h5f.create_group(patient_id)
         for i, (feature, mask) in enumerate(zip(all_features, all_masks)):
-            patient_group.create_dataset(f'features/{i}', data=feature)
-            patient_group.create_dataset(f'masks/{i}', data=mask)
+            patient_group.create_dataset(f'features/{i}',
+                                         compression="lzf",
+                                         data=feature,
+                                         chunks=feature.shape)
+            patient_group.create_dataset(f'masks/{i}',
+                                         compression="lzf",
+                                         data=mask,
+                                         chunks=mask.shape)
 
 
 def tfds2voxels(ds, patient_id, pet=False):
@@ -344,6 +350,17 @@ def rotate_image(image, mask, angle, axes=(0, 1)):
     return image_rot, mask_rot
 
 
+def get_voxels(hdf5_path, patient_id, modality):
+    isotropic_scale = 0.8
+    spatial_res = np.array([isotropic_scale, isotropic_scale, isotropic_scale]) # TODO: move to hfd5 file
+    with h5py.File(hdf5_path, 'r') as h5f:
+        idm = f'{patient_id}_{modality}'
+        slices = [int(k) for k in h5f[f'{idm}/img_exam'].keys()]
+        slices.sort()
+        img = np.dstack([h5f[f'{idm}/img_exam/{k}'][()] for k in slices])
+        mask = np.dstack([h5f[f'{idm}/mask_exam/{k}'][()] for k in slices])
+    return img, mask, spatial_res
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Obtener ViT patch embeddings de los dataset lung_radiomics")
 
@@ -356,58 +373,79 @@ if __name__ == "__main__":
                         help="path de los datasets tfds santa_maria y stanford")
     parser.add_argument("-f", "--feature_folder", type=str, default=os.path.join('data', 'features'),
                         help="carpeta de salida donde se guardaran los features")
-
+    parser.add_argument("-h5", "--hdf5_path", type=str, default=os.path.join('data', 'lung_radiomics', 'lung_radiomics_datasets_isotropic.hdf5'),
+                        help="path al dataset en formato HDF5 con imagenes isotropicas")
+    parser.add_argument("-df", "--df_path", type=str, default=os.path.join('data', 'lung_radiomics', 'lung_radiomics_datasets_isotropic.csv'),
+                        help="path a los metadatos del dataset")
     args = parser.parse_args()
     model_name = args.model_name
     model_path = args.model_path
     dataset_path = args.dataset_path
     feature_folder = args.feature_folder
-
+    ds_path = args.hdf5_path
+    df_metdata_path = args.df_path
+    
+    use_tfds = ds_path is None
     model = load_model(model_name, model_path)
     datasets = ['santa_maria_dataset', 'stanford_dataset']
-
+    modalities = ['pet', 'ct'] # TODO: move to argparse
     dataframes = []
+    if not use_tfds:
+        df_metadata = pd.read_csv(df_metdata_path)
+        df_metadata['label'] = (df_metadata['egfr'] == 'Mutant').astype(int)
+        patient2label = dict(zip(df_metadata['patient_id'], df_metadata['label']))
+        df_metadata = df_metadata[df_metadata[f'has_{"".join(modalities)}']]
+        df_metadata.reset_index(inplace=True, drop=True)
+
     for dataset_name in datasets:
         features_dir = os.path.join(feature_folder, dataset_name)
         os.makedirs(features_dir, exist_ok=True)
-        if dataset_name == 'stanford_dataset':
-            ds_pet, info_pet = tfds.load(f'{dataset_name}/pet', data_dir=dataset_path, with_info=True)
-            ds_ct, info_ct = tfds.load(f'{dataset_name}/ct', data_dir=dataset_path, with_info=True)
+        if use_tfds:
+            if dataset_name == 'stanford_dataset':
+                ds_pet, info_pet = tfds.load(f'{dataset_name}/pet', data_dir=dataset_path, with_info=True)
+                ds_ct, info_ct = tfds.load(f'{dataset_name}/ct', data_dir=dataset_path, with_info=True)
+            else:
+                ds_pet, info_pet = tfds.load(f'{dataset_name}/pet', data_dir=dataset_path, with_info=True)
+                ds_ct, info_ct = tfds.load(f'{dataset_name}/torax3d', data_dir=dataset_path, with_info=True)
+
+            patient_pet = set(list(ds_pet.keys()))
+            patient_ct = set(list(ds_ct.keys()))
+
+            patient_ids = list(patient_ct.intersection(patient_pet))
         else:
-            ds_pet, info_pet = tfds.load(f'{dataset_name}/pet', data_dir=dataset_path, with_info=True)
-            ds_ct, info_ct = tfds.load(f'{dataset_name}/torax3d', data_dir=dataset_path, with_info=True)
-
-        patient_pet = set(list(ds_pet.keys()))
-        patient_ct = set(list(ds_ct.keys()))
-
-        patient_ids = list(patient_ct.intersection(patient_pet))
+            dataset_name_sort = dataset_name.replace('_dataset', '')
+            patient_ids = list(df_metadata[df_metadata['dataset'] == dataset_name_sort]['patient_id'].unique())
 
         for patient_id in tqdm(patient_ids, desc=dataset_name):
             for modality in ['pet', 'ct']:
                 df_path = os.path.join(features_dir, f'{patient_id}_{modality}.parquet')
                 features_file = os.path.join(feature_folder, f'features_masks_{modality}.hdf5')
                 if not os.path.exists(df_path):
-                    if modality == 'ct':
-                        img_raw, mask_raw, label, spatial_res = tfds2voxels(ds_ct, patient_id)
-                    else:
-                        img_raw, mask_raw, label, spatial_res = tfds2voxels(ds_pet, patient_id, pet=True)
-
-                    label = label[0]
-                    if label not in [0, 1]:  # ignore unknown (2) and not collected (3) labels
-                        print(f'\nWarning: skip {patient_id} with label {label}')
-                    else:
-                        nodule_pixels = mask_raw.sum(axis=(0, 1)).round(2)
-                        if not nodule_pixels.max():
-                            print(f'\nWarning: {patient_id} has empty mask')
-
-                        # normalize pixel values
+                    if use_tfds:
                         if modality == 'ct':
-                            if model.model_name == 'medsam':
-                                img_raw = apply_window_ct(img_raw, width=800, level=40)
-                            else:
-                                img_raw = hu_to_rgb_vectorized(img_raw) / 255.0
+                            img_raw, mask_raw, label, spatial_res = tfds2voxels(ds_ct, patient_id)
                         else:
-                            img_raw = img_raw / img_raw.max()
+                            img_raw, mask_raw, label, spatial_res = tfds2voxels(ds_pet, patient_id, pet=True)
+
+                        label = label[0]
+                        if label not in [0, 1]:  # ignore unknown (2) and not collected (3) labels
+                            print(f'\nWarning: skip {patient_id} with label {label}')
+                        else:
+                            nodule_pixels = mask_raw.sum(axis=(0, 1)).round(2)
+                            if not nodule_pixels.max():
+                                print(f'\nWarning: {patient_id} has empty mask')
+
+                            # normalize pixel values
+                            if modality == 'ct':
+                                if model.model_name == 'medsam':
+                                    img_raw = apply_window_ct(img_raw, width=800, level=40)
+                                else:
+                                    img_raw = hu_to_rgb_vectorized(img_raw) / 255.0
+                            else:
+                                img_raw = img_raw / img_raw.max()
+                    else:
+                        label = patient2label[patient_id]
+                        img_raw, mask_raw, spatial_res = get_voxels(ds_path, patient_id, modality)
 
                         # extract patch features of each slice
                         df = {'slice': [],
