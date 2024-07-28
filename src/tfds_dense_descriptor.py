@@ -377,6 +377,8 @@ if __name__ == "__main__":
                         help="path al dataset en formato HDF5 con imagenes isotropicas")
     parser.add_argument("-df", "--df_path", type=str, default=os.path.join('data', 'lung_radiomics', 'lung_radiomics_datasets_isotropic.csv'),
                         help="path a los metadatos del dataset")
+    parser.add_argument("-mod", "--modality", type=str, default='ct',
+                        help="path a los metadatos del dataset")
     args = parser.parse_args()
     model_name = args.model_name
     model_path = args.model_path
@@ -384,11 +386,11 @@ if __name__ == "__main__":
     feature_folder = args.feature_folder
     ds_path = args.hdf5_path
     df_metdata_path = args.df_path
-    
+    second_modality = args.modality
     use_tfds = ds_path is None
     model = load_model(model_name, model_path)
     datasets = ['santa_maria_dataset', 'stanford_dataset']
-    modalities = ['pet', 'ct'] # TODO: move to argparse
+    modalities = ['pet', second_modality] # [pet, ct] or [pet, chest]
     dataframes = []
     if not use_tfds:
         df_metadata = pd.read_csv(df_metdata_path)
@@ -417,15 +419,15 @@ if __name__ == "__main__":
             patient_ids = list(df_metadata[df_metadata['dataset'] == dataset_name_sort]['patient_id'].unique())
 
         for patient_id in tqdm(patient_ids, desc=dataset_name):
-            for modality in ['pet', 'ct']:
+            for modality in modalities:
                 df_path = os.path.join(features_dir, f'{patient_id}_{modality}.parquet')
                 features_file = os.path.join(feature_folder, f'features_masks_{modality}.hdf5')
                 if not os.path.exists(df_path):
                     if use_tfds:
-                        if modality == 'ct':
-                            img_raw, mask_raw, label, spatial_res = tfds2voxels(ds_ct, patient_id)
-                        else:
+                        if modality == 'pet':
                             img_raw, mask_raw, label, spatial_res = tfds2voxels(ds_pet, patient_id, pet=True)
+                        else:
+                            img_raw, mask_raw, label, spatial_res = tfds2voxels(ds_ct, patient_id)
 
                         label = label[0]
                         if label not in [0, 1]:  # ignore unknown (2) and not collected (3) labels
