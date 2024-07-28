@@ -124,40 +124,6 @@ class TransformerNoduleBimodalClassifier(nn.Module):
         return logits_petct, petct_cls_token, logits_ct, logits_pet
 
 
-    def forward(self, x_ct, x_pet=None):
-
-        batch, seq_len, feature_dim = x_ct.shape
-
-        # add cls token and norm to each pet ct seq
-        x_ct = torch.cat([self.cls_token_ct.repeat(batch, 1, 1), x_ct], dim=1)
-        x_pet = torch.cat([self.cls_token_pet.repeat(batch, 1, 1), x_pet], dim=1)
-        x_ct = self.norm_ct(x_ct)
-        x_pet = self.norm_pet(x_pet)
-
-        # encode and classify each modality in an independent branch
-        x_ct = self.transformer_encoder_ct(x_ct)
-        x_pet = self.transformer_encoder_pet(x_pet)
-
-        logits_ct = self.classifier_ct(x_ct[:, 0, :])
-        logits_pet = self.classifier_pet(x_pet[:, 0, :])
-
-        # cross attention between pet-ct and ct-pet
-        x_ct_attn = self.cross_attention(query=x_ct, key=x_pet, value=x_pet)
-        x_pet_attn = self.cross_attention(query=x_pet, key=x_ct, value=x_ct)
-
-        #concatenate encoded modalities features into a single seq and classify
-        x_petct = torch.cat([x_ct_attn, x_pet_attn], dim=1)  
-
-        x_petct = torch.cat([self.cls_token_petct.repeat(batch, 1, 1), x_petct], dim=1) 
-
-        x_petct = self.transformer_encoder_petct(x_petct)
-
-        petct_cls_token = x_petct[:, 0, :]
-        logits_petct = self.classifier_petct(petct_cls_token) 
- 
-        return logits_petct, petct_cls_token, logits_ct, logits_pet
-
-
 class TransformerNoduleClassifier(nn.Module):
     def __init__(self, input_dim, dim_feedforward, num_heads, num_classes, num_layers,):
         super(TransformerNoduleClassifier, self).__init__()
