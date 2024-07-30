@@ -5,3 +5,7 @@ metrics/*
 plots/*
 .spyproject/*
 *__pycache__*
+# ignore extensions
+*.txt
+*.html
+*.csv
