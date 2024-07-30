@@ -6,6 +6,10 @@ models:
     virtual_batch_size: 32
     num_epochs: 50
     patience: 15
+    chest:
+      num_layers: 2
+      num_heads: 4
+      mlp_ratio: 4
     ct:
       num_layers: 2
       num_heads: 4

@@ -45,11 +45,12 @@ def positional_encoding_3d(x, y, z, D, scale=10000):
 
 
 class PETCTDataset3D(Dataset):
-    def __init__(self, dataframe, label_encoder, hdf5_ct_path, hdf5_pet_path, use_augmentation=False, feature_dim=256, arch='conv'):
+    def __init__(self, dataframe, label_encoder, hdf5_ct_path, hdf5_pet_path, modality_a='pet', modality_b='ct', use_augmentation=False, feature_dim=256, arch='conv'):
         self.slice_per_modality = dataframe.groupby(['patient_id', 'modality'])['slice'].max()
-        self.df_ct = dataframe[dataframe['modality'] == 'ct'].reset_index(drop=True)
-        self.df_pet = dataframe[dataframe['modality'] == 'pet'].reset_index(drop=True)
-
+        self.df_ct = dataframe[dataframe['modality'] == modality_b].reset_index(drop=True)
+        self.df_pet = dataframe[dataframe['modality'] == modality_a].reset_index(drop=True)
+        self.modality_a = modality_a
+        self.modality_b = modality_b
         if use_augmentation:
             n_samples = len(self.df_ct['patient_id_new'].unique())
             self.dataframe = self.df_ct.copy()
@@ -118,10 +119,10 @@ class PETCTDataset3D(Dataset):
         features_ct = self._get_features(self.hdf5_ct_path, patient_id, feature_ids, angle, flip, noise, spatial_res)
         features_ct = torch.as_tensor(features_ct, dtype=torch.float32)
 
-        ct_slices = ct_slices[start_slice_index:end_slice_index] / self.slice_per_modality.loc[(patient_id, 'ct')]
+        ct_slices = ct_slices[start_slice_index:end_slice_index] / self.slice_per_modality.loc[(patient_id, self.modality_b)]
         start_slice, end_slice = ct_slices.min(), ct_slices.max()
 
-        max_slice = self.slice_per_modality[patient_id, 'pet']
+        max_slice = self.slice_per_modality[patient_id, self.modality_a]
         start_slice = max(0, int(start_slice*max_slice))
         end_slice = min(max_slice, int(end_slice*max_slice))
 
@@ -405,14 +406,14 @@ class FocalLoss(nn.Module):
 
 
 def find_divisor(slice_count, modality):
-    if modality == 'ct':
+    if modality == 'ct' or modality == 'chest':
         desired_slices = 13
     else:
         desired_slices = 2
     return np.clip(desired_slices, 1, slice_count)
 
 
-def prepare_df(df):
+def prepare_df(df, modality_a='pet', modality_b='ct'):
     df['divisor'] = 1
     slices_per_patient = df.groupby(['patient_id', 'modality'])[['slice', 'divisor']].max()
     slices_per_patient.describe()
@@ -424,8 +425,8 @@ def prepare_df(df):
 
     df['patient_id_new'] = df.apply(lambda row: f"{row['patient_id']}:{np.ceil(row['slice']/row['divisor']).astype(int)}", axis=1)
 
-    df_pet = df[df['modality'] == 'pet']
-    df_ct = df[df['modality'] == 'ct']
+    df_pet = df[df['modality'] == modality_a]
+    df_ct = df[df['modality'] == modality_b]
 
     patient_ids = df_ct['patient_id'].unique()
     df_aux = []
@@ -451,18 +452,18 @@ def get_number_of_params(model):
     param_count = sum([np.prod(p.size()) for p in model_parameters])
     return param_count
 
-def build_model(cfg, arch, modality, num_classes=2):
+def build_model(cfg, arch, modality, modality_a, modality_b, num_classes=2):
     cfg_model = cfg['models'][arch]
     feature_dim = cfg_model['feature_dim']
-    if modality == 'petct':
-        mlp_ratio_ct = cfg_model['ct']['mlp_ratio']
-        mlp_ratio_pet = cfg_model['pet']['mlp_ratio']
+    if modality == 'petct' or modality == 'petchest':
+        mlp_ratio_ct = cfg_model[modality_b]['mlp_ratio']
+        mlp_ratio_pet = cfg_model[modality_a]['mlp_ratio']
 
-        num_heads_ct = cfg_model['ct']['num_heads']
-        num_heads_pet = cfg_model['pet']['num_heads']
+        num_heads_ct = cfg_model[modality_b]['num_heads']
+        num_heads_pet = cfg_model[modality_a]['num_heads']
 
-        num_layers_ct = cfg_model['ct']['num_layers']
-        num_layers_pet = cfg_model['pet']['num_layers']
+        num_layers_ct = cfg_model[modality_b]['num_layers']
+        num_layers_pet = cfg_model[modality_a]['num_layers']
 
         model = TransformerNoduleBimodalClassifier(feature_dim,
                                                    mlp_ratio_ct, mlp_ratio_pet,
@@ -503,8 +504,8 @@ if __name__ == "__main__":
                         help="dataset 'stanford' or 'santa_maria'")
     parser.add_argument("-b", "--backbone", type=str, default="medsam",
                         help="backbone ViT encoder 'medsam' or 'dinov2'")
-    parser.add_argument("-m", "--modality", type=str, default="petct",
-                        help="'ct', 'pet' or 'petct'")
+    parser.add_argument("-m", "--modality", type=str, default="petchest",
+                        help="'ct', 'pet', 'chest', 'petct' or 'petchest' ")
     parser.add_argument("-gpu", "--gpu", type=int, default=0,
                         help="id of gpu device, default is cuda:0")
     parser.add_argument("-l", "--loss", type=str, default='focal',
@@ -523,8 +524,14 @@ if __name__ == "__main__":
     experiment_name = args.experiment
     desired_datasets = [arg_dataset]
 
-    hdf5_pet_path = os.path.join('..', 'data', 'features', 'features_masks_pet.hdf5')
-    hdf5_ct_path = os.path.join('..', 'data', 'features', 'features_masks_ct.hdf5')
+    modality_a = 'pet'
+    if 'chest' in modality:
+        modality_b = 'chest'
+    else:
+        modality_b = 'ct'
+
+    hdf5_pet_path = os.path.join('..', 'data', 'features', f'features_masks_{modality_a}.hdf5')
+    hdf5_ct_path = os.path.join('..', 'data', 'features', f'features_masks_{modality_b}.hdf5')
     df_path = os.path.join('..', 'data', 'features', 'petct.parquet')
     models_save_dir = os.path.join('..', 'models', experiment_name, f'{backbone}_{arch}_{arg_dataset}')
 
@@ -534,7 +541,7 @@ if __name__ == "__main__":
     df = pd.read_parquet(df_path)
     df['flip'] = df['flip'].astype(str)
     df.reset_index(drop=True, inplace=True)
-    df = prepare_df(df)
+    df = prepare_df(df, modality_a, modality_b)
 
     # create labelmap and onehot enconder for nodule EGFR mutation
     EGFR_encoder = get_label_encoder(df)
@@ -550,14 +557,14 @@ if __name__ == "__main__":
                      'test_report': []}
 
     # use KFold to split patients stratified by label
-    folds = list(cfg['kfold_patients'][arg_dataset].keys())
+    folds = list(cfg['kfold_patients'][modality_b][arg_dataset].keys())
     for kfold in tqdm(folds, desc='kfold', leave=False, position=0):
         save_dir = os.path.join(models_save_dir, modality, f'kfold_{kfold}')
         os.makedirs(save_dir, exist_ok=True)
 
         # get patient_ids of each split
-        training_patients = cfg['kfold_patients'][arg_dataset][kfold]['train']
-        testing_patients = cfg['kfold_patients'][arg_dataset][kfold]['test']
+        training_patients = cfg['kfold_patients'][modality_b][arg_dataset][kfold]['train']
+        testing_patients = cfg['kfold_patients'][modality_b][arg_dataset][kfold]['test']
 
         # filter dataframes based on the split patients
         df_train = df[df['patient_id'].isin(training_patients)]
@@ -575,7 +582,7 @@ if __name__ == "__main__":
         num_epochs = cfg_model['num_epochs']
 
         # Create model instance
-        model = build_model(cfg, arch, modality, num_classes=2)
+        model = build_model(cfg, arch, modality, modality_a, modality_b, num_classes=2)
 
         print(model)
         print(get_number_of_params(model))
@@ -598,6 +605,8 @@ if __name__ == "__main__":
                                        label_encoder=EGFR_encoder,
                                        hdf5_ct_path=hdf5_ct_path,
                                        hdf5_pet_path=hdf5_pet_path,
+                                       modality_a=modality_a,
+                                       modality_b=modality_b,
                                        use_augmentation=True,
                                        feature_dim=feature_dim,
                                        arch=arch)
@@ -606,6 +615,8 @@ if __name__ == "__main__":
                                       label_encoder=EGFR_encoder,
                                       hdf5_ct_path=hdf5_ct_path,
                                       hdf5_pet_path=hdf5_pet_path,
+                                      modality_a=modality_a,
+                                      modality_b=modality_b,
                                       use_augmentation=False,
                                       feature_dim=feature_dim,
                                       arch=arch)
@@ -644,14 +655,14 @@ if __name__ == "__main__":
                 iters_to_accumulate = min(virtual_batch_size, len(train_loader))
                 for ct_batch, pet_batch, labels_batch, patient_id_batch in tqdm(train_loader, position=2, desc='train batch'):
                     labels_batch = torch.squeeze(labels_batch).to(device)
-                    if modality == 'petct':
+                    if modality == 'petct' or modality == 'petchest':
                         ct_batch = ct_batch.to(device)
                         pet_batch = pet_batch.to(device)
                         outputs = model(ct_batch, pet_batch)
                     elif modality == 'pet':
                         pet_batch = pet_batch.to(device)
                         outputs = model(pet_batch)
-                    elif modality == 'ct':
+                    elif modality == 'ct' or modality == 'chest':
                         ct_batch = ct_batch.to(device)
                         outputs = model(ct_batch)
                     if loss_func == 'crossmodal':
@@ -680,14 +691,14 @@ if __name__ == "__main__":
                 with torch.no_grad():
                     for ct_batch, pet_batch, labels_batch, patient_id_batch in tqdm(test_loader, position=2, desc='test batch'):
                         labels_batch = torch.squeeze(labels_batch).to(device)
-                        if modality == 'petct':
+                        if modality == 'petct' or modality == 'petchest':
                             ct_batch = ct_batch.to(device)
                             pet_batch = pet_batch.to(device)
                             outputs = model(ct_batch, pet_batch)
                         elif modality == 'pet':
                             pet_batch = pet_batch.to(device)
                             outputs = model(pet_batch)
-                        elif modality == 'ct':
+                        elif modality == 'ct' or modality == 'chest':
                             ct_batch = ct_batch.to(device)
                             outputs = model(ct_batch)
                         if loss_func == 'crossmodal':
