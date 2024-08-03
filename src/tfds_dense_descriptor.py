@@ -351,10 +351,9 @@ def rotate_image(image, mask, angle, axes=(0, 1)):
 
 
 def get_voxels(hdf5_path, patient_id, modality):
-    isotropic_scale = 0.8
-    spatial_res = np.array([isotropic_scale, isotropic_scale, isotropic_scale]) # TODO: move to hfd5 file
     with h5py.File(hdf5_path, 'r') as h5f:
         idm = f'{patient_id}_{modality}'
+        spatial_res = np.array(h5f[f'{idm}/spatial_res'][()])
         slices = [int(k) for k in h5f[f'{idm}/img_exam'].keys()]
         slices.sort()
         img = np.dstack([h5f[f'{idm}/img_exam/{k}'][()] for k in slices])
@@ -373,9 +372,9 @@ if __name__ == "__main__":
                         help="path de los datasets tfds santa_maria y stanford")
     parser.add_argument("-f", "--feature_folder", type=str, default=os.path.join('data', 'features'),
                         help="carpeta de salida donde se guardaran los features")
-    parser.add_argument("-h5", "--hdf5_path", type=str, default=os.path.join('data', 'lung_radiomics', 'lung_radiomics_datasets_isotropic.hdf5'),
+    parser.add_argument("-h5", "--hdf5_path", type=str, default=os.path.join('data', 'lung_radiomics', 'lung_radiomics_datasets_anysotropic.hdf5'),
                         help="path al dataset en formato HDF5 con imagenes isotropicas")
-    parser.add_argument("-df", "--df_path", type=str, default=os.path.join('data', 'lung_radiomics', 'lung_radiomics_datasets_isotropic.csv'),
+    parser.add_argument("-df", "--df_path", type=str, default=os.path.join('data', 'lung_radiomics', 'lung_radiomics_datasets_anysotropic.csv'),
                         help="path a los metadatos del dataset")
     parser.add_argument("-mod", "--modality", type=str, default='ct',
                         help="path a los metadatos del dataset")
