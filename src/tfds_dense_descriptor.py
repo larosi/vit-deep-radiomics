@@ -27,7 +27,7 @@ from visualization_utils import (crop_image,
                                  hu_to_rgb_vectorized)
 
 
-def prepare_image(img):
+def prepare_image(img, model_name='medsam'):
     """ Resize image and convert to torch cuda tensor
 
     Args:
@@ -37,11 +37,22 @@ def prepare_image(img):
         img_tensor (torch.tensor): image as cuda tensor with shape (batch, h, w, ch).
 
     """
-    if len(img.shape) < 3:
+    if model_name == 'medsam':
         img = gray2rgb(img)
         img_tensor = resize(img, (1024, 1024))
-    else:
-        img_tensor = resize(img, (896, 896))
+        
+    elif model_name == 'smdino':
+        mu = 0.5
+        std = 0.5
+        img_tensor = resize(img, (224*3, 224*3))
+        img_tensor = np.expand_dims(img_tensor, axis=-1)
+        img_tensor = (img_tensor - mu) / std
+    elif model_name == 'dinov2':
+        mu = (0.485, 0.456, 0.406)
+        std = (0.229, 0.224, 0.225)
+        img_tensor = resize(img, (224*3, 224*3))
+        img_tensor = gray2rgb(img_tensor)
+        img_tensor = (img_tensor - mu) / std
     img_tensor = img_tensor.transpose((2, 0, 1))
     img_tensor = np.expand_dims(img_tensor, axis=0)
     img_tensor = torch.as_tensor(img_tensor, dtype=torch.float32).cuda()
@@ -52,13 +63,18 @@ def load_model(model_name, model_path=None):
     """ Load a ViT model as image encoder
 
     Args:
-        model_name (str): 'medsam' or 'dinov2'.
+        model_name (str): 'medsam', 'dinov2' or 'smdino'.
         model_path (str, optional): path to the .pth file. Defaults to None.
 
     Returns:
         model (torch.nn.Module): loaded torch model.
 
     """
+    if model_name == 'smdino':
+        from smdino.medical_sdino import load_sdino
+        model = load_sdino(model_path)
+        device = torch.cuda.current_device()
+        model.to(device)
     if model_name == 'dinov2':
         model = load_dinov2()
     elif model_name == 'medsam':
@@ -67,11 +83,11 @@ def load_model(model_name, model_path=None):
     return model
 
 
-def load_dinov2(backbone_size='small'):
+def load_dinov2(backbone_size='base'):
     """ Load dinov2 ViT model from torch.hub
 
     Args:
-        backbone_size (str, optional): size of ViT backbone. Defaults to 'small'.
+        backbone_size (str, optional): size of ViT backbone. Defaults to 'base'.
 
     Returns:
         model (torch.nn.Module): loaded torch model.
@@ -83,7 +99,7 @@ def load_dinov2(backbone_size='small'):
                       "giant": "vitg14"}
 
     backbone_arch = backbone_archs[backbone_size]
-    backbone_name = f"dinov2_{backbone_arch}"
+    backbone_name = f"dinov2_{backbone_arch}_reg"
     model = torch.hub.load(repo_or_dir="facebookresearch/dinov2", model=backbone_name)
     model.eval()
     model.cuda()
@@ -118,15 +134,17 @@ def get_dense_descriptor(model, img):
         features (np.array): slice feature maps with shape (N//patch_size, M//patch_size, feature_dim).
 
     """
-    img_tensor = prepare_image(img)
+    img_tensor = prepare_image(img, model_name=model.model_name)
     if model.model_name == 'medsam':
         features_tensor = model.image_encoder(img_tensor)
         features = features_tensor.cpu().detach().numpy()
         features = np.squeeze(features)
         features = np.transpose(features, (1, 2, 0))
-    else:
-        features_tensor = model.patch_embed(img_tensor)
+    else: # Dino
+        features_dict = model.forward_features(img_tensor)
+        features_tensor = features_dict['x_norm_patchtokens']
         features = features_tensor.cpu().detach().numpy()
+        del features_dict
         features = np.squeeze(features)
 
         featmap_size = int(np.sqrt(features.shape[0]))
@@ -269,11 +287,10 @@ def generate_features(model, img_3d, mask_3d, tqdm_text, display=False):
     features_list = []
     mask_list = []
     for slice_i in tqdm(range(0, img_3d.shape[2]), desc=tqdm_text, leave=False):
-        if model.model_name == 'medsam':
-            img = img_3d[:, :, slice_i]
-        else:
-            img = img_3d[:, :, slice_i, :]
         mask = mask_3d[:, :, slice_i] > 0
+        if mask.sum() < 1:
+            continue
+        img = img_3d[:, :, slice_i]
         features = get_dense_descriptor(model, img)
         crop_features = extract_roi(features, bigger_mask)
         crop_mask = extract_roi(mask, bigger_mask)
@@ -352,32 +369,44 @@ def rotate_image(image, mask, angle, axes=(0, 1)):
 
 def get_voxels(hdf5_path, patient_id, modality):
     with h5py.File(hdf5_path, 'r') as h5f:
+        pet_liver_mean = 1
         idm = f'{patient_id}_{modality}'
-        spatial_res = np.array(h5f[f'{idm}/spatial_res'][()])
+        is_pet = modality == 'pet'
+
+        if is_pet:
+            pet_liver = h5f[f'{idm}/pet_liver'][()]
+            pet_liver_mean = pet_liver[pet_liver != 0].mean() + 1e-10
         slices = [int(k) for k in h5f[f'{idm}/img_exam'].keys()]
         slices.sort()
         img = np.dstack([h5f[f'{idm}/img_exam/{k}'][()] for k in slices])
         mask = np.dstack([h5f[f'{idm}/mask_exam/{k}'][()] for k in slices])
-    return img, mask, spatial_res
+        spatial_res = np.abs(h5f[f'{idm}/spatial_res'][()])
+        label = np.abs(h5f[f'{idm}/egfr_label'][()])
+
+    if is_pet:
+        img = img / pet_liver_mean
+
+    return img, mask, label, spatial_res
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Obtener ViT patch embeddings de los dataset lung_radiomics")
 
-    parser.add_argument("-mn", "--model_name", type=str, default="medsam",
-                        help="backbone ViT encoder medsam o dinov2")
+    parser.add_argument("-mn", "--model_name", type=str, default="smdino",
+                        help="backbone ViT encoder medsam o smdino")
     parser.add_argument("-mp", "--model_path", type=str,
-                        default=os.path.join('models', 'backbones', 'medsam', 'medsam_vit_b.pth'),
+                        default=os.path.join('models', 'backbones', 'smdino', 'model.pth'),
                         help="path del archivo model.pth")
     parser.add_argument("-d", "--dataset_path", type=str, default=os.path.join('data', 'lung_radiomics'),
                         help="path de los datasets tfds santa_maria y stanford")
     parser.add_argument("-f", "--feature_folder", type=str, default=os.path.join('data', 'features'),
                         help="carpeta de salida donde se guardaran los features")
-    parser.add_argument("-h5", "--hdf5_path", type=str, default=os.path.join('data', 'lung_radiomics', 'lung_radiomics_datasets_anysotropic.hdf5'),
+    parser.add_argument("-h5", "--hdf5_path", type=str, default=os.path.join('data', 'lung_radiomics', 'lung_radiomics_datasets.hdf5'),
                         help="path al dataset en formato HDF5 con imagenes isotropicas")
-    parser.add_argument("-df", "--df_path", type=str, default=os.path.join('data', 'lung_radiomics', 'lung_radiomics_datasets_anysotropic.csv'),
+    parser.add_argument("-df", "--df_path", type=str, default=os.path.join('data', 'lung_radiomics', 'lung_radiomics_datasets.csv'),
                         help="path a los metadatos del dataset")
     parser.add_argument("-mod", "--modality", type=str, default='ct',
                         help="path a los metadatos del dataset")
+
     args = parser.parse_args()
     model_name = args.model_name
     model_path = args.model_path
@@ -395,7 +424,10 @@ if __name__ == "__main__":
         df_metadata = pd.read_csv(df_metdata_path)
         df_metadata['label'] = (df_metadata['egfr'] == 'Mutant').astype(int)
         patient2label = dict(zip(df_metadata['patient_id'], df_metadata['label']))
-        df_metadata = df_metadata[df_metadata[f'has_{"".join(modalities)}']]
+        if second_modality == 'pet':
+            df_metadata = df_metadata[np.logical_or(df_metadata['has_petct'], df_metadata['has_petchest'])]
+        else:
+            df_metadata = df_metadata[df_metadata[f'has_{"".join(modalities)}']]
         df_metadata.reset_index(inplace=True, drop=True)
 
     for dataset_name in datasets:
@@ -418,7 +450,7 @@ if __name__ == "__main__":
             patient_ids = list(df_metadata[df_metadata['dataset'] == dataset_name_sort]['patient_id'].unique())
 
         for patient_id in tqdm(patient_ids, desc=dataset_name):
-            for modality in modalities:
+            for modality in [second_modality]:
                 df_path = os.path.join(features_dir, f'{patient_id}_{modality}.parquet')
                 features_file = os.path.join(feature_folder, f'features_masks_{modality}.hdf5')
                 if not os.path.exists(df_path):
@@ -438,15 +470,18 @@ if __name__ == "__main__":
 
                             # normalize pixel values
                             if modality == 'ct':
-                                if model.model_name == 'medsam':
-                                    img_raw = apply_window_ct(img_raw, width=800, level=40)
-                                else:
-                                    img_raw = hu_to_rgb_vectorized(img_raw) / 255.0
+                                img_raw = apply_window_ct(img_raw, width=800, level=40)
                             else:
                                 img_raw = img_raw / img_raw.max()
                     else:
                         label = patient2label[patient_id]
-                        img_raw, mask_raw, spatial_res = get_voxels(ds_path, patient_id, modality)
+                        img_raw, mask_raw, _, spatial_res = get_voxels(ds_path, patient_id, modality)
+                        # normalize pixel values
+                        if modality == 'pet':
+                            img_raw = img_raw / img_raw.max()
+                        else:
+                            img_raw = apply_window_ct(img_raw, width=1800, level=40)
+                        #img_raw, mask_raw, spatial_res = get_voxels(ds_path, patient_id, modality)
 
                         # extract patch features of each slice
                         df = {'slice': [],
@@ -461,7 +496,7 @@ if __name__ == "__main__":
                         # apply flip and rotation to use them as offline data augmentation
                         for flip_type in [None, 'horizontal', 'vertical']:
                             image_flip, mask_flip = flip_image(img_raw, mask_raw, flip_type)
-                            for angle in range(0, 180, 45):
+                            for angle in [0, 90]:#range(0, 180, 45):
                                 image, mask = rotate_image(image_flip, mask_flip, angle)
                                 features, features_mask = generate_features(model=model,
                                                                             img_3d=image,
