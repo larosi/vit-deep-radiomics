@@ -143,6 +143,7 @@ class PETCTDataset3D(Dataset):
     def _get_features(self, hdf5_path, patient_id, feature_ids, angle, flip, noise, spatial_res):
         features = []
         masks = []
+        use_mask = False
 
         with h5py.File(hdf5_path, 'r') as h5f:
             for feature_id in feature_ids:
@@ -170,15 +171,21 @@ class PETCTDataset3D(Dataset):
             y = (y.flatten() / h_new).flatten() * h_orig * spatial_res[1]
             z = (z.flatten()).flatten() * spatial_res[2]
 
-            masks = masks.flatten()
-            x = (x - x.mean() + noise[0])[masks]
-            y = (y - y.mean() + noise[1])[masks]
-            z = (z - z.mean() + noise[2])[masks]
+            x = (x - x.mean() + noise[0])
+            y = (y - y.mean() + noise[1])
+            z = (z - z.mean() + noise[2])
+    
+            if use_mask:
+                masks = masks.flatten()
+                x = x[masks]
+                y = y[masks]
+                z = z[masks]
 
             pe = positional_encoding_3d(x, y, z, D=self.feature_dim, scale=10000)
-
-            features = features.reshape(-1, self.feature_dim)[masks, :] + pe / 4  # (seq_len, feat_dim)
-
+            if use_mask:
+                features = features.reshape(-1, self.feature_dim)[masks, :] + pe / 4  # (seq_len, feat_dim)
+            else:
+                features = features.reshape(-1, self.feature_dim) + pe / 4 
         return features
 
 
@@ -802,8 +809,8 @@ if __name__ == "__main__":
                 epochs_since_improvement = epoch - df_loss.iloc[df_loss['is_improvement'].argmax()]['epoch']
 
                 # save .pth model checkpoint
-                if df_loss['target_metric'].iloc[-1] >= df_loss['target_metric'].mean():
-                    save_checkpoint(model, save_dir, epoch)
+                if epochs_since_improvement == 0:
+                    save_checkpoint(model, save_dir, epoch=0)
 
                 if epochs_since_improvement >= patience:
                     print(f"Early stopping triggered after {epoch + 1} epochs")
