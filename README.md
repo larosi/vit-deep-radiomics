@@ -9,16 +9,18 @@ data/lung_radiomics/
 ```
 
 ## Precalculate Patch Embeddings
-To obtain patch tokens for each segmented slice of a patient, use the `tfds_dense_descriptor.py` script. Each modality (PET and CT) needs to be processed separately. Run the following commands:
+To obtain patch tokens for each segmented slice of a patient, use the `tfds_dense_descriptor.py` script. Each modality (PET and CT) needs to be processed separately. The available backbones are [MedSAM](https://github.com/bowang-lab/MedSAM), [DinoV2](https://github.com/facebookresearch/dinov2) & [SMDino](https://github.com/larosi/steerable-medical-dino/tree/main)
+
+Run the following commands:
 
 For CT:
 ```bash
-python tfds_dense_descriptor.py --model_name 'medsam' --model_path "model.path" --modality 'ct'
+python tfds_dense_descriptor.py --model_name 'medsam' --model_path "model.pth" --modality 'ct'
 ```
 
 For PET:
 ```bash
-python tfds_dense_descriptor.py --model_name 'medsam' --model_path "model.path" --modality 'pet'
+python tfds_dense_descriptor.py --model_name 'medsam' --model_path "model.pth" --modality 'pet'
 ```
 
 ## Create Metadata DataFrame
