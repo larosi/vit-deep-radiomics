@@ -46,7 +46,7 @@ def min_max_scale(data):
     return data
 
 
-def pca_colorize(features, output_shape, remove_bg=False):
+def pca_colorize(features, output_shape=None, remove_bg=False):
     n_samples = features.shape[0]
     n_components = 3
     if n_samples >= n_components:
@@ -56,15 +56,17 @@ def pca_colorize(features, output_shape, remove_bg=False):
     else:
         rgb = np.repeat(np.expand_dims(np.ones(n_components), 0), n_samples, axis=0)
     rgb = min_max_scale(rgb)
-    rgb = rgb.reshape(output_shape + (n_components,))
 
-    if remove_bg:
-        thresh = threshold_otsu(rgb[:, :, 0])
-        rgb_mask = (rgb[:, :, 0] > thresh)*1
-        rgb[:, :, 0] *= rgb_mask
-        rgb[:, :, 1] *= rgb_mask
-        rgb[:, :, 2] *= rgb_mask
-        rgb = min_max_scale(rgb)
+    if output_shape:
+        rgb = rgb.reshape(output_shape + (n_components,))
+
+        if remove_bg:
+            thresh = threshold_otsu(rgb[:, :, 0])
+            rgb_mask = (rgb[:, :, 0] > thresh)*1
+            rgb[:, :, 0] *= rgb_mask
+            rgb[:, :, 1] *= rgb_mask
+            rgb[:, :, 2] *= rgb_mask
+            rgb = min_max_scale(rgb)
 
     return rgb
 
