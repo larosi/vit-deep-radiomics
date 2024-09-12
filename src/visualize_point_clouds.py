@@ -23,7 +23,9 @@ def export_to_cloud_compare(df, patients, offset=100):
         df_sample['y'] = df_sample['y'] + (i % nrows) * offset
 
         for modality in df_sample['modality'].unique():
-            df_sample_path = os.path.join('..', 'data', 'points', dataset, modality, f'{patient_id}_{label}.txt')
+            output_dir = os.path.join('..', 'data', 'points', dataset, modality)
+            os.makedirs(output_dir, exist_ok=True)
+            df_sample_path = os.path.join(output_dir, f'{patient_id}_{label}.txt')
             df_sample[df_sample['modality'] == modality][['x', 'y', 'z', 'grey']].to_csv(df_sample_path, sep=' ', index=False)
 
 
@@ -54,7 +56,13 @@ def export_umap_to_cloud_compare(df, df_umap, dataset, modality='ct', offset=10,
 
     if to_sketchfab:
         umap_cc_path = os.path.join('..', 'data', 'points', f'{dataset}_{modality}_umap.asc')
-        df[['x', 'y', 'z', 'grey', 'grey', 'grey']].astype(int).to_csv(umap_cc_path, sep=' ', index=False, header=False)
+        df_to_save = df[['x', 'y', 'z']].astype(int)
+        alpha = 0.25
+        df_to_save['r'] = df['grey'] 
+        df_to_save['g'] = df['grey'] * (1-df['label']*alpha)
+        df_to_save['b'] = df['grey'] * (1-df['label']*alpha)
+
+        df_to_save.astype(int).to_csv(umap_cc_path, sep=' ', index=False, header=False)
     else:
         umap_cc_path = os.path.join('..', 'data', 'points', f'{dataset}_{modality}_umap.txt')
         df[['x', 'y', 'z', 'grey', 'label', 'is_test']].to_csv(umap_cc_path, sep=' ', index=False)
@@ -91,5 +99,5 @@ if __name__ == "__main__":
     df_umap = df_umap[df_umap['patient_id'].isin(patients['patient_id'].values)]
 
     df['is_test'] = df['patient_id'].isin(test_patients) * 1
-    export_umap_to_cloud_compare(df, df_umap, dataset, modality='ct', offset=10, use_2D=False, to_sketchfab=False)
-    export_umap_to_cloud_compare(df, df_umap, dataset, modality='pet', offset=10, use_2D=False, to_sketchfab=False)
+    export_umap_to_cloud_compare(df, df_umap, dataset, modality='ct', offset=10, use_2D=False, to_sketchfab=True)
+    export_umap_to_cloud_compare(df, df_umap, dataset, modality='pet', offset=10, use_2D=False, to_sketchfab=True)
