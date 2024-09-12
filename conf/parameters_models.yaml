@@ -1,7 +1,7 @@
 models:
   transformer:
     learning_rate: 0.0005
-    feature_dim: 256
+    feature_dim: 768 # use 256 for medsam 768 for dino
     batch_size: 1
     virtual_batch_size: 32
     num_epochs: 50
