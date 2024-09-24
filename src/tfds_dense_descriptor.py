@@ -406,6 +406,7 @@ if __name__ == "__main__":
                         help="path a los metadatos del dataset")
     parser.add_argument("-mod", "--modality", type=str, default='ct',
                         help="path a los metadatos del dataset")
+    parser.add_argument("-gpu", "--gpu_device", type=str, default='0', help="cuda device number")
 
     args = parser.parse_args()
     model_name = args.model_name
@@ -416,6 +417,9 @@ if __name__ == "__main__":
     df_metdata_path = args.df_path
     second_modality = args.modality
     use_tfds = ds_path is None
+    gpu_device = args.gpu_device
+    torch.cuda.set_device(int(gpu_device))
+
     model = load_model(model_name, model_path)
     datasets = ['santa_maria_dataset', 'stanford_dataset']
     modalities = ['pet', second_modality] # [pet, ct] or [pet, chest]
